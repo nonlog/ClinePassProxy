@@ -403,6 +403,45 @@ func TestUpstreamErrorIsReportedAndRetried(t *testing.T) {
 	}
 }
 
+func TestFailedRequestRecordsStatusAndDuration(t *testing.T) {
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusPaymentRequired)
+		_, _ = w.Write([]byte(`{"error":{"message":"Insufficient balance. Your Cline Credits balance is $-0.08"}}`))
+	}))
+	defer cline.Close()
+
+	server, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusPaymentRequired {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "Insufficient balance") {
+		t.Fatalf("upstream message was not surfaced: %s", recorder.Body.String())
+	}
+	records := server.History.List(1, "")
+	if len(records) != 1 {
+		t.Fatalf("expected a recorded failure, got %d records", len(records))
+	}
+	record := records[0]
+	if record.Status != http.StatusPaymentRequired {
+		t.Fatalf("recorded status = %d, want 402", record.Status)
+	}
+	if record.DurationMS <= 0 && len(record.Timings) == 0 {
+		t.Fatalf("recorded failure has neither duration nor timings: %+v", record)
+	}
+	if _, complete := record.Timings[admin.StageRequestComplete]; !complete {
+		t.Fatalf("failure record is missing the terminal stage: %v", record.Timings)
+	}
+	if record.FailoverCount != 1 || len(record.Attempts) != 1 {
+		t.Fatalf("attempt trail not recorded: %+v", record.Attempts)
+	}
+}
+
 // readEvents normalizes an SSE body so substring assertions survive framing.
 func readEvents(t *testing.T, body []byte) string {
 	t.Helper()

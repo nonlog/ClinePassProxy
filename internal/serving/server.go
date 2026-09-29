@@ -292,9 +292,9 @@ func (s *Server) failWithTrail(w http.ResponseWriter, request *requestContext, s
 	record := request.tracker.Record()
 	record.Attempts = request.trail.all()
 	record.FailoverCount = len(record.Attempts)
-	request.tracker.Finish(status, errors.New(credentials.Sanitize(err.Error())))
-	s.History.Append(*request.tracker.Record())
-	writeError(w, status, request.tracker.Record().Error)
+	final := request.tracker.Finish(status, errors.New(credentials.Sanitize(err.Error())))
+	s.History.Append(final)
+	writeError(w, status, final.Error)
 }
 
 // dispatch runs one inference request, including credential failover.
@@ -334,13 +334,17 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, request *reque
 		lastErr, lastStatus = err, status
 		request.trail.add(fmt.Sprintf("%s -> HTTP %d: %s", credential.Label, status, credentials.Sanitize(err.Error())))
 		s.recordCredentialFailure(credential.ID, status, err)
+		if !retryable || attempt == settings.RetryFailover {
+			break
+		}
 		// Failover only helps when another credential remains untried. With a
 		// single credential a retry would replay the same warm-cache session on
 		// the same key, so report the upstream error instead.
-		if !retryable || attempt == settings.RetryFailover || !hasUntriedCredential(enabled, ignore) {
+		ignore[credential.ID] = true
+		if !hasUntriedCredential(enabled, ignore) {
+			delete(ignore, credential.ID)
 			break
 		}
-		ignore[credential.ID] = true
 	}
 
 	if lastStatus == 0 {
