@@ -47,7 +47,7 @@ curl -fsSL -o "${WORK}/${ASSET}.sha256" "${BASE_URL}/${ASSET}.sha256"
 
 install -d -m 0700 "${INSTALL_DIR}/bin"
 install -m 0755 "${WORK}/${ASSET}" "${BIN_PATH}.new"
-INSTALLED_VERSION="$("${BIN_PATH}.new" -version)"
+INSTALLED_VERSION="$("${BIN_PATH}.new" -version 2>&1)"
 mv "${BIN_PATH}.new" "$BIN_PATH"
 echo "installed: ${INSTALLED_VERSION}"
 

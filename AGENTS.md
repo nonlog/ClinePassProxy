@@ -29,6 +29,40 @@ Do not trade protocol correctness for performance. Never:
 Prompt cache is a hard requirement. A lower TTFT with a collapsed cache hit rate is a
 regression, not an optimization.
 
+## Review findings that must not regress
+
+Each of these was a real defect found in review. They are invariants, not preferences.
+
+- **Prompt-prefix bytes.** Anthropic `system` stays an ordered list of text blocks,
+  with the Claude Code attribution block dropped; never join the blocks into one
+  string. Responses input is rebuilt into Chat Completions order: one assistant
+  message per turn's parallel calls, every present result directly after it, results
+  without a `call_id` paired with the batch they follow in input order, and an
+  incomplete history left untouched. A new rule needs a fixture in
+  `internal/translate/testdata/parity/`, not just a passing assertion.
+- **Cancellation.** The upstream request derives from the client request context, so a
+  cancelled turn stops the Cline call instead of running to the upstream deadline. A
+  client cancel is never recorded as a credential failure.
+- **Shared client state.** `upstream.Client` reads and writes its base URL under a
+  lock; `dispatch` repoints it on every request while other requests are in flight.
+- **No silent truncation.** An SSE frame is only delivered once a blank line closes
+  it. A stream cut mid-frame, without a finish reason, or without `[DONE]` produces an
+  error frame (`event: error`, `response.failed`, no `[DONE]`) and is recorded as 502.
+  A JSON error body is never appended to an open event stream.
+- **Affinity.** Rendezvous (highest-random-weight) hashing. A pool change may only move
+  the sessions bound to the credential that left the pool.
+- **Readiness.** Derived from the live credential pool on every call, never pinned at
+  startup. Inference is closed while no gateway key is configured; `allow_unauthenticated`
+  is the only way to open it.
+- **Metric honesty.** `ttft_ms` is the write that carried the first visible token;
+  `provider_ttft_ms` is the provider's first event. A protocol prologue frame is never
+  time-to-first-token.
+- **Management edits.** An omitted field keeps its stored value; only an explicit value
+  changes it (`enabled`, `proxy_url`).
+- **Connector panel.** The browser only ever talks to CPA. The connector serves the
+  console and forwards its API calls server-to-server, so the management token stays
+  server-side and the in-network proxy address never has to resolve from a browser.
+
 ## Supported surface
 
 ```
