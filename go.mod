@@ -1,5 +1,5 @@
 module github.com/nonlog/ClinePassProxy
 
-go 1.27.1
+go 1.26.0
 
-require golang.org/x/net v0.59.0 // indirect
+require golang.org/x/net v0.59.0
