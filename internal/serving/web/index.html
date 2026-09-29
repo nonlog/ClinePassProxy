@@ -1,0 +1,497 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClinePassProxy</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1c2230;
+    --line: #2a3140;
+    --text: #e6edf3;
+    --muted: #8b97a8;
+    --accent: #4c9aff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 14px 22px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  header .build { color: var(--muted); font-size: 12px; }
+  nav { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  nav button {
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  }
+  nav button:hover { color: var(--text); background: var(--panel-2); }
+  nav button.active { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+  main { padding: 22px; max-width: 1240px; margin: 0 auto; }
+  section { display: none; }
+  section.active { display: block; }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 13px; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .6px; }
+  .metric { font-size: 26px; font-weight: 600; }
+  .metric small { font-size: 13px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+  tbody tr:hover { background: var(--panel-2); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  button.action {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 12px;
+  }
+  button.action:hover { border-color: var(--accent); }
+  button.action.danger:hover { border-color: var(--bad); color: var(--bad); }
+  .pill { padding: 2px 8px; border-radius: 999px; font-size: 11px; border: 1px solid var(--line); }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+  .muted { color: var(--muted); }
+  form.stack { display: grid; gap: 10px; max-width: 560px; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  input, select, textarea {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 9px; font: inherit; font-size: 13px;
+  }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow: auto; }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 10px; max-width: 640px; width: 92%; }
+  dialog::backdrop { background: rgba(0,0,0,.6); }
+  .hint { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ClinePassProxy</h1>
+  <span class="build" id="build"></span>
+  <nav>
+    <button data-tab="dashboard" class="active">Dashboard</button>
+    <button data-tab="credentials">Credentials</button>
+    <button data-tab="models">Models</button>
+    <button data-tab="requests">Requests</button>
+    <button data-tab="usage">Usage</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</header>
+<main>
+  <section id="tab-dashboard" class="active"></section>
+  <section id="tab-credentials"></section>
+  <section id="tab-models"></section>
+  <section id="tab-requests"></section>
+  <section id="tab-usage"></section>
+  <section id="tab-settings"></section>
+</main>
+<dialog id="request-dialog"><div id="request-detail"></div></dialog>
+
+<script>
+const state = { status: null, credentials: [], models: null, requests: [], config: null, usage: null };
+
+const api = async (path, options = {}) => {
+  const response = await fetch(path, {
+    ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const text = await response.text();
+  let payload = null;
+  try { payload = text ? JSON.parse(text) : null; } catch { payload = text; }
+  if (!response.ok) {
+    const message = payload && payload.error ? payload.error.message : response.statusText;
+    throw new Error(message || `HTTP ${response.status}`);
+  }
+  return payload;
+};
+
+const el = (tag, attrs = {}, ...children) => {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (key === "class") node.className = value;
+    else if (key === "html") node.innerHTML = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else if (value !== null && value !== undefined) node.setAttribute(key, value);
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+};
+
+const fmt = {
+  num: (value) => value === null || value === undefined ? "—" : Number(value).toLocaleString(),
+  ms: (value) => value ? `${Number(value).toFixed(0)} ms` : "—",
+  tps: (value) => value ? `${Number(value).toFixed(1)} tok/s` : "—",
+  pct: (value) => value || value === 0 ? `${(Number(value) * 100).toFixed(1)}%` : "—",
+  time: (value) => value ? new Date(value).toLocaleString() : "—",
+  bytes: (value) => {
+    if (!value) return "—";
+    const units = ["B", "KiB", "MiB", "GiB"];
+    let size = Number(value), index = 0;
+    while (size >= 1024 && index < units.length - 1) { size /= 1024; index++; }
+    return `${size.toFixed(index ? 1 : 0)} ${units[index]}`;
+  },
+};
+
+const healthPill = (health) => {
+  const klass = health === "ok" ? "ok" : health === "disabled" ? "" : health === "unknown" ? "warn" : "bad";
+  return el("span", { class: `pill ${klass}` }, health || "unknown");
+};
+
+// ---------------------------------------------------------------- dashboard
+
+function renderDashboard() {
+  const status = state.status || {};
+  const usage = status.usage || {};
+  const health = status.health || {};
+  const target = document.getElementById("tab-dashboard");
+  target.replaceChildren(
+    el("div", { class: "grid" },
+      card("Health", el("div", { class: "metric" }, status.ready ? "ready" : "degraded",
+        el("small", {}, status.ready_error || ""))),
+      card("Version", el("div", { class: "metric" }, status.version || "—",
+        el("small", {}, (status.commit || "").slice(0, 10)))),
+      card("Requests", el("div", { class: "metric" }, fmt.num(usage.requests),
+        el("small", {}, `${fmt.num(usage.successes)} ok / ${fmt.num(usage.errors)} err`))),
+      card("Average TTFT", el("div", { class: "metric" }, fmt.ms(usage.average_ttft_ms))),
+      card("Decode TPS", el("div", { class: "metric" }, fmt.tps(usage.average_decode_tps))),
+      card("End-to-end TPS", el("div", { class: "metric" }, fmt.tps(usage.average_end_to_end_tps))),
+      card("Cache hit ratio", el("div", { class: "metric" }, fmt.pct(usage.cache_hit_ratio),
+        el("small", {}, `${fmt.num(usage.cached_tokens)} / ${fmt.num(usage.prompt_tokens)} tokens`))),
+      card("Credentials", el("div", { class: "metric" }, fmt.num(status.enabled_count),
+        el("small", {}, Object.entries(health).map(([k, v]) => `${v} ${k}`).join(" · ")))),
+    ),
+    el("div", { class: "card", style: "margin-top:16px" },
+      el("h3", {}, "Operational notes"),
+      el("p", { class: "hint" },
+        "TTFT, decode TPS and end-to-end TPS are reported separately. NewAPI's displayed TPS divides completion tokens by total time, so it hides healthy decode throughput behind first-token latency."),
+    ),
+  );
+}
+
+const card = (title, ...body) => el("div", { class: "card" }, el("h3", {}, title), ...body);
+
+// ---------------------------------------------------------------- credentials
+
+function renderCredentials() {
+  const target = document.getElementById("tab-credentials");
+  const rows = state.credentials.map((credential) => el("tr", {},
+    el("td", {}, credential.label, el("div", { class: "muted mono" }, credential.id)),
+    el("td", {}, el("span", { class: "mono" }, credential.masked_key || "—")),
+    el("td", {}, healthPill(credential.health),
+      credential.health_error ? el("div", { class: "muted" }, credential.health_error) : null),
+    el("td", {}, credential.proxy_scheme ? `${credential.proxy_scheme} ${credential.proxy}` : "direct"),
+    el("td", {}, credential.usage
+      ? el("div", {}, (credential.usage.limits || []).map((limit) =>
+          el("div", {}, `${limit.type}: ${limit.percent_used === null || limit.percent_used === undefined ? "—" : `${limit.percent_used.toFixed(1)}%`}`)).concat(
+          credential.usage.plan_name ? [el("div", { class: "muted" }, credential.usage.plan_name)] : []))
+      : el("span", { class: "muted" }, "not queried")),
+    el("td", {}, el("div", { class: "row" },
+      el("button", { class: "action", onclick: () => toggleCredential(credential) }, credential.enabled ? "Disable" : "Enable"),
+      el("button", { class: "action", onclick: () => testCredential(credential) }, "Test"),
+      el("button", { class: "action", onclick: () => refreshCredential(credential) }, "Refresh"),
+      el("button", { class: "action", onclick: () => editCredential(credential) }, "Edit"),
+      el("button", { class: "action danger", onclick: () => deleteCredential(credential) }, "Delete"),
+    )),
+  ));
+
+  target.replaceChildren(
+    el("div", { class: "toolbar" },
+      el("button", { class: "action", onclick: () => editCredential(null) }, "Add credential"),
+      el("button", { class: "action", onclick: () => loadCredentials() }, "Reload"),
+      el("span", { class: "hint" }, "Keys are stored in data/credentials.json with 0600 permissions and never rendered in full."),
+    ),
+    el("div", { class: "card" },
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", {}, "Credential"), el("th", {}, "Key"), el("th", {}, "Health"),
+          el("th", {}, "Proxy"), el("th", {}, "Quota"), el("th", {}, "Actions"))),
+        el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: "6", class: "muted" }, "No credentials yet."))))),
+  );
+}
+
+async function loadCredentials() {
+  const payload = await api("/api/credentials");
+  state.credentials = payload.credentials || [];
+  renderCredentials();
+}
+
+async function toggleCredential(credential) {
+  await api(`/api/credentials/${credential.id}`, {
+    method: "PUT",
+    body: JSON.stringify({ id: credential.id, label: credential.label, enabled: !credential.enabled }),
+  });
+  await loadCredentials();
+}
+
+async function testCredential(credential) {
+  const result = await api(`/api/credentials/${credential.id}/test`, { method: "POST" });
+  toast(result.ok ? `ok in ${result.latency_ms} ms: ${result.reply || ""}` : `failed: ${result.error || result.status}`);
+  await loadCredentials();
+}
+
+async function refreshCredential(credential) {
+  await api(`/api/credentials/${credential.id}/refresh`, { method: "POST" });
+  toast("quota refreshed");
+  await loadCredentials();
+}
+
+async function deleteCredential(credential) {
+  if (!confirm(`Delete credential ${credential.label}?`)) return;
+  await api(`/api/credentials/${credential.id}`, { method: "DELETE" });
+  await loadCredentials();
+}
+
+function editCredential(credential) {
+  const label = prompt("Label", credential ? credential.label : "");
+  if (label === null) return;
+  const apiKey = prompt("Cline API key" + (credential ? " (leave empty to keep the stored value)" : ""), "");
+  if (apiKey === null) return;
+  const proxy = prompt("Per-credential proxy URL (empty for direct)", credential ? credential.proxy || "" : "");
+  if (proxy === null) return;
+  const body = { label, api_key: apiKey, proxy_url: proxy };
+  const request = credential
+    ? api(`/api/credentials/${credential.id}`, { method: "PUT", body: JSON.stringify(body) })
+    : api("/api/credentials", { method: "POST", body: JSON.stringify(body) });
+  request.then(loadCredentials).catch((error) => toast(error.message));
+}
+
+// ---------------------------------------------------------------- models
+
+function renderModels() {
+  const payload = state.models || {};
+  const target = document.getElementById("tab-models");
+  const rows = (payload.models || []).map((model) => el("tr", {},
+    el("td", {}, model.id),
+    el("td", {}, el("span", { class: "mono" }, model.upstream_id || "—")),
+    el("td", {}, (model.providers || []).join(", ") || "auto"),
+    el("td", {}, model.disabled ? el("span", { class: "pill bad" }, "disabled") : el("span", { class: "pill ok" }, "enabled")),
+    el("td", {}, el("button", { class: "action", onclick: () => testModel(model.id) }, "Test request")),
+  ));
+  target.replaceChildren(
+    el("div", { class: "toolbar" },
+      el("button", { class: "action", onclick: () => testModel(prompt("Model ID") || "") }, "Test model"),
+      el("span", { class: "hint" }, payload.passthrough
+        ? "No alias table configured: model IDs pass through to Cline unchanged."
+        : "Alias table configured: unknown model IDs are rejected."),
+    ),
+    el("div", { class: "card" },
+      el("table", {},
+        el("thead", {}, el("tr", {}, el("th", {}, "Model"), el("th", {}, "Upstream"), el("th", {}, "Providers"), el("th", {}, "State"), el("th", {}, ""))),
+        el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: "5", class: "muted" }, "No aliases configured."))))),
+    el("div", { class: "card", style: "margin-top:16px" },
+      el("h3", {}, "Models seen in traffic"),
+      el("div", { class: "muted" }, (payload.seen_models || []).join(", ") || "none yet")),
+  );
+}
+
+async function testModel(model) {
+  if (!model) return;
+  const result = await api("/api/models/test", { method: "POST", body: JSON.stringify({ model }) });
+  toast(result.ok ? `${model} replied in ${result.latency_ms} ms: ${result.reply || ""}` : `${model} failed: ${result.error || result.status}`);
+}
+
+// ---------------------------------------------------------------- requests
+
+function renderRequests() {
+  const target = document.getElementById("tab-requests");
+  const rows = state.requests.map((record) => el("tr", {},
+    el("td", {}, fmt.time(record.started_at)),
+    el("td", {}, record.endpoint, el("div", { class: "muted mono" }, record.model || "")),
+    el("td", {}, record.credential_label || "—"),
+    el("td", {}, record.stream ? "stream" : "batch"),
+    el("td", {}, record.status >= 200 && record.status < 300
+      ? el("span", { class: "pill ok" }, record.status)
+      : el("span", { class: "pill bad" }, record.status)),
+    el("td", {}, fmt.ms(record.ttft_ms)),
+    el("td", {}, fmt.tps(record.decode_tps)),
+    el("td", {}, `${fmt.num(record.prompt_tokens)} / ${fmt.num(record.cached_tokens)} / ${fmt.num(record.completion_tokens)}`),
+    el("td", {}, fmt.pct(record.cache_hit_ratio)),
+    el("td", {}, el("button", { class: "action", onclick: () => showRequest(record.id) }, "Detail")),
+  ));
+  target.replaceChildren(
+    el("div", { class: "toolbar" },
+      el("button", { class: "action", onclick: () => loadRequests() }, "Reload"),
+      el("span", { class: "hint" }, "Tokens shown as prompt / cached / completion."),
+    ),
+    el("div", { class: "card" },
+      el("table", {},
+        el("thead", {}, el("tr", {},
+          el("th", {}, "Time"), el("th", {}, "Endpoint"), el("th", {}, "Credential"), el("th", {}, "Mode"),
+          el("th", {}, "Status"), el("th", {}, "TTFT"), el("th", {}, "Decode TPS"), el("th", {}, "Tokens"), el("th", {}, "Cache"), el("th", {}, ""))),
+        el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: "10", class: "muted" }, "No requests recorded yet."))))),
+  );
+}
+
+async function loadRequests() {
+  const payload = await api("/api/requests?limit=100");
+  state.requests = payload.requests || [];
+  renderRequests();
+}
+
+async function showRequest(id) {
+  const record = await api(`/api/requests/${id}`);
+  const dialog = document.getElementById("request-dialog");
+  document.getElementById("request-detail").replaceChildren(
+    el("h3", {}, `Request ${record.id}`),
+    el("pre", {}, JSON.stringify(record, null, 2)),
+    el("div", { class: "row" }, el("button", { class: "action", onclick: () => dialog.close() }, "Close")),
+  );
+  dialog.showModal();
+}
+
+// ---------------------------------------------------------------- usage
+
+function renderUsage() {
+  const target = document.getElementById("tab-usage");
+  const summary = state.usage || {};
+  const rows = state.credentials.map((credential) => el("tr", {},
+    el("td", {}, credential.label),
+    el("td", {}, healthPill(credential.health)),
+    el("td", {}, credential.usage && credential.usage.plan_name || "—"),
+    el("td", {}, (credential.usage && credential.usage.limits || []).map((limit) =>
+      `${limit.type} ${limit.percent_used === null || limit.percent_used === undefined ? "—" : `${limit.percent_used.toFixed(1)}%`}`).join(", ") || "—"),
+    el("td", {}, credential.usage ? fmt.time(credential.usage.checked_at) : "—"),
+  ));
+  target.replaceChildren(
+    el("div", { class: "grid" },
+      card("Prompt tokens", el("div", { class: "metric" }, fmt.num(summary.prompt_tokens))),
+      card("Cached tokens", el("div", { class: "metric" }, fmt.num(summary.cached_tokens))),
+      card("Completion tokens", el("div", { class: "metric" }, fmt.num(summary.completion_tokens))),
+      card("Cache hit ratio", el("div", { class: "metric" }, fmt.pct(summary.cache_hit_ratio))),
+    ),
+    el("div", { class: "card", style: "margin-top:16px" },
+      el("table", {},
+        el("thead", {}, el("tr", {}, el("th", {}, "Credential"), el("th", {}, "Health"), el("th", {}, "Plan"), el("th", {}, "Limits"), el("th", {}, "Checked"))),
+        el("tbody", {}, rows.length ? rows : el("tr", {}, el("td", { colspan: "5", class: "muted" }, "No credentials."))))),
+  );
+}
+
+// ---------------------------------------------------------------- settings
+
+function renderSettings() {
+  const config = state.config || {};
+  const target = document.getElementById("tab-settings");
+  const form = el("form", { class: "stack", onsubmit: saveSettings },
+    field("Cline base URL", el("input", { name: "base_url", value: config.base_url || "" })),
+    field("Timeout (seconds)", el("input", { name: "timeout_seconds", type: "number", value: config.timeout_seconds || 300 })),
+    field("Max response bytes", el("input", { name: "max_response_bytes", type: "number", value: config.max_response_bytes || 67108864 })),
+    field("Retry/failover attempts", el("input", { name: "retry_failover", type: "number", value: config.retry_failover ?? 1 })),
+    field("Affinity policy", el("select", { name: "affinity" },
+      ["session", "sticky", "round-robin"].map((value) =>
+        el("option", { value, selected: (config.affinity || "session") === value ? "selected" : null }, value)))),
+    field("Affinity header (optional)", el("input", { name: "affinity_header", value: config.affinity_header || "" })),
+    field("Log retention (requests)", el("input", { name: "log_retention", type: "number", value: config.log_retention || 2000 })),
+    field(`Gateway API keys (${config.gateway_key_count || 0} stored, one per line)`, el("textarea", {
+      name: "gateway_keys", rows: "3", placeholder: "leave empty to keep the stored keys",
+    })),
+    field("Management token (leave empty to keep)", el("input", { name: "management_token", placeholder: "••••••" })),
+    el("div", { class: "row" },
+      el("button", { class: "action", type: "submit" }, "Save settings"),
+      el("span", { class: "hint" }, `Data directory: ${config.data_dir || "—"}`)),
+  );
+  target.replaceChildren(
+    el("div", { class: "card" }, el("h3", {}, "Settings"), form),
+    el("div", { class: "card", style: "margin-top:16px" },
+      el("h3", {}, "Current gateway keys"),
+      el("div", { class: "mono muted" }, (config.gateway_keys || []).join("\n") || "none configured")),
+  );
+}
+
+const field = (label, control) => el("label", {}, label, control);
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const form = new FormData(event.target);
+  const payload = {
+    base_url: form.get("base_url"),
+    timeout_seconds: Number(form.get("timeout_seconds")),
+    max_response_bytes: Number(form.get("max_response_bytes")),
+    retry_failover: Number(form.get("retry_failover")),
+    affinity: form.get("affinity"),
+    affinity_header: form.get("affinity_header"),
+    log_retention: Number(form.get("log_retention")),
+  };
+  const keys = (form.get("gateway_keys") || "").split("\n").map((value) => value.trim()).filter(Boolean);
+  if (keys.length) payload.gateway_keys = keys;
+  const managementToken = (form.get("management_token") || "").trim();
+  if (managementToken) payload.management_token = managementToken;
+  try {
+    state.config = await api("/api/config", { method: "PUT", body: JSON.stringify(payload) });
+    toast("settings saved");
+    renderSettings();
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+// ---------------------------------------------------------------- shell
+
+function toast(message) {
+  const node = el("div", {
+    style: "position:fixed;bottom:18px;right:18px;background:var(--panel-2);border:1px solid var(--line);padding:10px 14px;border-radius:8px;max-width:520px;z-index:20",
+  }, message);
+  document.body.append(node);
+  setTimeout(() => node.remove(), 6000);
+}
+
+const renderers = {
+  dashboard: renderDashboard,
+  credentials: renderCredentials,
+  models: renderModels,
+  requests: renderRequests,
+  usage: renderUsage,
+  settings: renderSettings,
+};
+
+const loaders = {
+  credentials: loadCredentials,
+  models: async () => { state.models = await api("/api/models"); renderModels(); },
+  requests: loadRequests,
+  usage: async () => {
+    const payload = await api("/api/usage");
+    state.usage = payload.summary || {};
+    state.credentials = payload.credentials || [];
+    renderUsage();
+  },
+  settings: async () => { state.config = await api("/api/config"); renderSettings(); },
+};
+
+document.querySelectorAll("nav button").forEach((button) => {
+  button.addEventListener("click", async () => {
+    document.querySelectorAll("nav button").forEach((other) => other.classList.toggle("active", other === button));
+    const tab = button.dataset.tab;
+    document.querySelectorAll("section").forEach((section) => section.classList.toggle("active", section.id === `tab-${tab}`));
+    if (loaders[tab]) await loaders[tab]();
+    if (renderers[tab]) renderers[tab]();
+  });
+});
+
+async function refreshStatus() {
+  state.status = await api("/api/status");
+  state.credentials = state.status.credentials || [];
+  document.getElementById("build").textContent = `${state.status.version} · ${(state.status.commit || "").slice(0, 10)}`;
+  if (document.getElementById("tab-dashboard").classList.contains("active")) renderDashboard();
+  if (document.getElementById("tab-credentials").classList.contains("active")) renderCredentials();
+}
+
+refreshStatus().then(() => loadCredentials()).catch((error) => toast(error.message));
+setInterval(() => refreshStatus().catch(() => {}), 15000);
+</script>
+</body>
+</html>

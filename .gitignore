@@ -1,0 +1,16 @@
+# Local scratch
+*.log
+*.tmp
+/data/
+/bin/
+/dist/
+*.exe
+
+# Agent-local prompt material is not part of the product
+/ClinePassProxy Prompt.md
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

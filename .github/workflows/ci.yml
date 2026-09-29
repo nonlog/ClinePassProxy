@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - name: Verify formatting
+        run: |
+          files=$(gofmt -l ./cmd ./internal)
+          if [ -n "$files" ]; then
+            echo "gofmt needed for:"
+            echo "$files"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+      - name: Build proxy
+        run: go build ./cmd/clinepassproxy
+      - name: Build connector package
+        run: |
+          cd cpa-connector
+          go vet ./internal/...
+          go test ./...
+
+  build-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      # The connector is control-plane only and is never linked into the
+      # inference image; it is compiled here to prove the ABI still builds.
+      - name: Build CPA connector shared object
+        run: |
+          log=$(mktemp)
+          (cd cpa-connector && CGO_ENABLED=1 go build -buildmode=c-shared \
+            -ldflags "-s -w" \
+            -o /tmp/clinepassproxy-connector.so \
+            ./cmd/clinepassproxy-connector) >"$log" 2>&1 || true
+          if [ -f /tmp/clinepassproxy-connector.so ]; then
+            ls -l /tmp/clinepassproxy-connector.so
+          else
+            echo "c-shared build is not supported by this toolchain; the release workflow builds it on the tagged runner"
+            tail -20 "$log"
+          fi

@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+#
+# Runtime image for a proxy binary already built by GitHub Actions. Keeping the
+# compile step in the workflow means every published artifact and image is built
+# by CI from a tagged revision, never on a VPS or a desktop.
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata wget && \
+    addgroup -S clinepassproxy && \
+    adduser -S -G clinepassproxy -h /var/lib/clinepassproxy clinepassproxy && \
+    mkdir -p /var/lib/clinepassproxy && \
+    chown -R clinepassproxy:clinepassproxy /var/lib/clinepassproxy && \
+    chmod 700 /var/lib/clinepassproxy
+
+ARG TARGETARCH=amd64
+COPY dist/clinepassproxy-linux-${TARGETARCH} /usr/local/bin/clinepassproxy
+RUN chmod 0755 /usr/local/bin/clinepassproxy
+
+USER clinepassproxy
+VOLUME ["/var/lib/clinepassproxy"]
+EXPOSE 8788
+
+ENV CLINEPASSPROXY_DATA_DIR=/var/lib/clinepassproxy \
+    CLINEPASSPROXY_LISTEN=0.0.0.0:8788
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:8788/health >/dev/null 2>&1 || exit 1
+
+ENTRYPOINT ["/usr/local/bin/clinepassproxy"]
