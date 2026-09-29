@@ -163,9 +163,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		}
 		health[state]++
 	}
-	s.mu.RLock()
-	ready, readyErr := s.ready, s.readyErr
-	s.mu.RUnlock()
+	ready, readyErr := s.readiness()
 	settings := s.Config.Get()
 
 	writeJSON(w, http.StatusOK, map[string]any{

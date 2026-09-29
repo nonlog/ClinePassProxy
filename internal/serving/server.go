@@ -34,8 +34,14 @@ type Server struct {
 
 	startedAt time.Time
 	mu        sync.RWMutex
-	ready     bool
-	readyErr  string
+	override  *readinessOverride
+}
+
+// readinessOverride lets a caller pin the ready state; it stays nil in normal
+// operation so readiness tracks the credential pool.
+type readinessOverride struct {
+	ready  bool
+	reason string
 }
 
 // New builds a server around the given stores.
@@ -55,8 +61,21 @@ func New(settings *config.Store, creds *credentials.Store, history *admin.Histor
 func (s *Server) SetReady(ready bool, reason string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.ready = ready
-	s.readyErr = reason
+	s.override = &readinessOverride{ready: ready, reason: reason}
+}
+
+// readiness reports whether the proxy can serve inference traffic.
+func (s *Server) readiness() (bool, string) {
+	s.mu.RLock()
+	override := s.override
+	s.mu.RUnlock()
+	if override != nil {
+		return override.ready, override.reason
+	}
+	if len(s.Creds.Enabled()) == 0 {
+		return false, "no enabled Cline credential is configured"
+	}
+	return true, ""
 }
 
 // Handler builds the HTTP routing table.
@@ -107,17 +126,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
-	s.mu.RLock()
-	ready, reason := s.ready, s.readyErr
-	s.mu.RUnlock()
+	ready, reason := s.readiness()
 	status := http.StatusOK
-	payload := map[string]any{"ready": true, "credentials": len(s.Creds.Enabled())}
 	if !ready {
 		status = http.StatusServiceUnavailable
-		payload["ready"] = false
-		payload["reason"] = reason
 	}
-	writeJSON(w, status, payload)
+	writeJSON(w, status, map[string]any{
+		"ready":       ready,
+		"credentials": len(s.Creds.Enabled()),
+		"reason":      reason,
+	})
 }
 
 func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
@@ -449,8 +467,9 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 		if payload == "[DONE]" {
 			break
 		}
-		s.observeChunk(request, []byte(payload))
-		frames, err := emit([]byte(payload))
+		chunk := unwrapCompletionEnvelope([]byte(payload))
+		s.observeChunk(request, chunk)
+		frames, err := emit(chunk)
 		if err != nil {
 			return err
 		}
@@ -481,6 +500,7 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 
 // observeChunk records usage and provider metadata from an upstream chunk.
 func (s *Server) observeChunk(request *requestContext, raw []byte) {
+	raw = unwrapCompletionEnvelope(raw)
 	root, err := models.DecodeObject(raw)
 	if err != nil {
 		return

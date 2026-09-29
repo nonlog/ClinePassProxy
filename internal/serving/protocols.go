@@ -69,6 +69,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 		if err != nil {
 			return http.StatusBadGateway, err, true
 		}
+		raw = unwrapCompletionEnvelope(raw)
 		converted, err := translate.OpenAICompletionToClaude(raw, request.model, request.raw)
 		if err != nil {
 			return http.StatusBadGateway, err, false
@@ -132,6 +133,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 		if err != nil {
 			return http.StatusBadGateway, err, true
 		}
+		raw = unwrapCompletionEnvelope(raw)
 		converted, err := translate.OpenAICompletionToResponses(raw, request.model, request.raw, translated)
 		if err != nil {
 			return http.StatusBadGateway, err, false
@@ -201,6 +203,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 		if err != nil {
 			return http.StatusBadGateway, err, true
 		}
+		raw = unwrapCompletionEnvelope(raw)
 		s.observeChunk(request, raw)
 		s.finishRequest(request, http.StatusOK, nil)
 		w.Header().Set("Content-Type", "application/json")
@@ -355,6 +358,27 @@ func readAll(stream *upstream.Stream, limit int64) ([]byte, error) {
 		return nil, errors.New("upstream response exceeds the configured limit")
 	}
 	return raw, nil
+}
+
+// unwrapCompletionEnvelope removes Cline's `{"success":true,"data":{...}}`
+// wrapper from a blocking completion. Streaming chunks are unwrapped per frame.
+func unwrapCompletionEnvelope(raw []byte) []byte {
+	root, err := models.DecodeObject(raw)
+	if err != nil {
+		return raw
+	}
+	if models.List(root["choices"]) != nil {
+		return raw
+	}
+	data := models.Object(root["data"])
+	if data == nil || models.List(data["choices"]) == nil {
+		return raw
+	}
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return raw
+	}
+	return encoded
 }
 
 // upstreamMessage extracts a Cline error message from a JSON body.

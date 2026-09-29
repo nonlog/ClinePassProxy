@@ -14,6 +14,7 @@ import (
 	"github.com/nonlog/ClinePassProxy/internal/admin"
 	"github.com/nonlog/ClinePassProxy/internal/config"
 	"github.com/nonlog/ClinePassProxy/internal/credentials"
+	"github.com/nonlog/ClinePassProxy/internal/models"
 )
 
 // stubCline emits a deterministic Chat Completions stream, writing each chunk
@@ -153,6 +154,58 @@ func TestMessagesStreamingRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(events, `"cache_read_input_tokens":8`) {
 		t.Fatalf("cache tokens missing:\n%s", events)
+	}
+}
+
+func TestMessagesNonStreamingUnwrapsClineEnvelope(t *testing.T) {
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"success":true,"data":{"id":"chatcmpl-env","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"unwrapped"},"finish_reason":"stop"}],"usage":{"prompt_tokens":9,"completion_tokens":2,"prompt_tokens_details":{"cached_tokens":4}}}}`))
+	}))
+	defer cline.Close()
+
+	_, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	var message map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &message); err != nil {
+		t.Fatalf("non-streaming reply is not JSON: %v (%s)", err, recorder.Body.String())
+	}
+	content := models.List(message["content"])
+	if len(content) == 0 || models.String(models.Object(content[0])["text"]) != "unwrapped" {
+		t.Fatalf("envelope was not unwrapped: %s", recorder.Body.String())
+	}
+	usage := models.Object(message["usage"])
+	if models.Number(usage["cache_read_input_tokens"]) != 4 {
+		t.Fatalf("cache tokens lost through the envelope: %v", usage)
+	}
+}
+
+func TestMessagesStreamingUnwrapsClineEnvelope(t *testing.T) {
+	chunks := []string{
+		`{"success":true,"data":{"id":"chatcmpl-env","choices":[{"index":0,"delta":{"content":"wrapped"}}]}}`,
+		`{"success":true,"data":{"id":"chatcmpl-env","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":1}}}`,
+	}
+	cline := stubCline(t, chunks)
+	defer cline.Close()
+
+	_, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	events := readEvents(t, recorder.Body.Bytes())
+	if !strings.Contains(events, `"text":"wrapped"`) {
+		t.Fatalf("streamed envelope was not unwrapped:\n%s", events)
 	}
 }
 
