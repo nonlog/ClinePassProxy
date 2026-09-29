@@ -46,9 +46,13 @@ func TestPanelLoadsTheConsoleThroughTheConnector(t *testing.T) {
 		t.Fatalf("panel did not serve the standalone console:\n%s", page)
 	}
 	// The console calls /api/... on its own origin; the shim must redirect those
-	// calls to the connector's management routes.
-	if !strings.Contains(page, panelPrefix) || !strings.Contains(page, "\"/api/\"") {
-		t.Fatalf("panel is missing the API rewrite shim:\n%s", page)
+	// calls to the connector's management routes and reuse CPAMP's saved
+	// management login. Otherwise CPA itself rejects the rewritten call before
+	// the connector can attach its server-to-server ClinePassProxy token.
+	for _, want := range []string{panelPrefix, "\"/api/\"", "cli-proxy-auth", "enc::v2::", "Authorization"} {
+		if !strings.Contains(page, want) {
+			t.Fatalf("panel is missing %q from the CPA auth/rewrite shim:\n%s", want, page)
+		}
 	}
 
 	status, _, body, err = service.HandleManagement(http.MethodGet, panelPrefix+"/status", nil, nil, nil)

@@ -366,9 +366,29 @@ func injectPanelShim(page string) string {
 }
 
 func panelShim() string {
-	return "<script>(function(){var P=\"" + panelPrefix + "\";var f=window.fetch;" +
-		"window.fetch=function(i,n){if(typeof i===\"string\"&&i.indexOf(\"/api/\")===0){i=P+i.slice(4);}" +
-		"return f.call(this,i,n);};})();</script>"
+	// CPAMP protects every /v0/management/* route with its own management key.
+	// The standalone UI normally talks to /api/* without that header because
+	// ClinePassProxy itself prompts for HTTP Basic auth. Inside CPAMP, however,
+	// those calls are rewritten back through CPA, so reuse the login that CPAMP
+	// already saved for this origin. This is the same enc::v1/enc::v2 storage
+	// format used by the official management center and ClinePassBridge.
+	//
+	// The recovered key is attached only to same-origin CPA management requests;
+	// it is never sent to ClinePassProxy or embedded in the returned HTML.
+	return "<script>(function(){" +
+		"function k(){try{if(localStorage.getItem('isLoggedIn')!=='true')return'';" +
+		"var v=localStorage.getItem('cli-proxy-auth');if(!v)return'';var p='',s='';" +
+		"if(v.indexOf('enc::v2::')===0){p='enc::v2::';s='cli-proxy-api-webui::secure-storage|v2|'+location.host;}" +
+		"else if(v.indexOf('enc::v1::')===0){p='enc::v1::';s='cli-proxy-api-webui::secure-storage|'+location.host+'|'+navigator.userAgent;}" +
+		"if(p){var b=Uint8Array.from(atob(v.slice(p.length)),function(c){return c.charCodeAt(0);});" +
+		"var m=new TextEncoder().encode(s);v=new TextDecoder().decode(b.map(function(x,j){return x^m[j%m.length];}));}" +
+		"var a=JSON.parse(v).state;if(!a||a.rememberPassword!==true||typeof a.managementKey!=='string')return'';" +
+		"return a.managementKey.trim();}catch(e){return'';}}" +
+		"var P=\"" + panelPrefix + "\",f=window.fetch;" +
+		"window.fetch=function(i,n){if(typeof i===\"string\"&&i.indexOf(\"/api/\")===0){" +
+		"i=P+i.slice(4);n=n||{};var h=new Headers(n.headers||{}),a=k();" +
+		"if(a&&!h.has('Authorization'))h.set('Authorization','Bearer '+a);" +
+		"n=Object.assign({},n,{headers:h});}return f.call(this,i,n);};})();</script>"
 }
 
 // panelErrorHTML explains a panel that could not reach the proxy instead of
