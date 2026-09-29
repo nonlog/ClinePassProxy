@@ -108,6 +108,29 @@ The Requests view separates the two.
 
 ## Deploy
 
+Two hosting models use the same binary and the same state layout. Pick the one
+that matches how the caller reaches the proxy.
+
+### systemd (current VPS deployment)
+
+The Cline caller (CPA) runs with host networking, so the proxy runs as a host
+process on loopback and CPA reaches it at `http://127.0.0.1:8788`.
+
+```bash
+scripts/deploy-vps.sh v0.1.3
+```
+
+The script downloads the published binary, verifies its checksum, swaps
+`/opt/clinepassproxy/bin/clinepassproxy`, restarts the unit and checks `/health`
+and `/ready`. The unit sets `CLINEPASSPROXY_DATA_DIR=/var/lib/clinepassproxy` and
+`CLINEPASSPROXY_LISTEN=127.0.0.1:8788`, and keeps `ProtectSystem=full` with
+`ReadWritePaths` limited to the state directory.
+
+### Docker
+
+Use this when the caller is another container on a shared Docker network; the
+published image listens on `0.0.0.0:8788` inside its own namespace.
+
 ```bash
 docker run -d --name clinepassproxy \
   -p 127.0.0.1:8788:8788 \
@@ -115,8 +138,16 @@ docker run -d --name clinepassproxy \
   ghcr.io/nonlog/clinepassproxy:latest
 ```
 
-Then open the UI, add at least one Cline credential, set a gateway API key, and
-point NewAPI channel #53 at `http://clinepassproxy:8788`.
+`docker-compose.example.yml` is the same deployment in compose form.
+
+Either way, open the UI, add at least one Cline credential and set a gateway API
+key before pointing a caller at it. Inference stays closed until a gateway key
+exists.
+
+A container on the default bridge cannot reach a host process on `127.0.0.1`.
+Bind the proxy to the bridge address (`172.17.0.1:8788`) or run it on the
+caller's Docker network; the loopback default is deliberate, not a limitation to
+work around with `0.0.0.0`.
 
 Production artifacts come from GitHub Actions only:
 
