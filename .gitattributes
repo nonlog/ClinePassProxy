@@ -1,0 +1,8 @@
+# Keep checked-in files byte-identical on every platform so CI formatting and
+# whitespace checks are meaningful.
+* text=auto eol=lf
+
+# Binary release inputs and fixtures.
+*.png binary
+*.so binary
+*.exe binary
