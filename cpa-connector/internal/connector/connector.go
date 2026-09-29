@@ -208,8 +208,9 @@ func (s *Service) Routes() []Route {
 		Method:      "GET",
 		Path:        "/v0/management/clinepassproxy/panel",
 		Description: "Browser panel for ClinePassProxy",
-		Menu:        "ClinePassProxy",
-		Options:     routeOptions("GET", "/v0/management/clinepassproxy/panel"),
+		// The browser menu is registered by resourcePayload(). Keeping Menu on
+		// this route as well makes CPA render two identical sidebar entries.
+		Options: routeOptions("GET", "/v0/management/clinepassproxy/panel"),
 	})
 	return routes
 }

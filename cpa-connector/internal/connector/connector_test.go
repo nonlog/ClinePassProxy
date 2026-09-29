@@ -104,3 +104,21 @@ func TestConnectorDeclaresNoInferenceCapability(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectorRegistersSingleMenuEntry(t *testing.T) {
+	service := NewService()
+	menuCount := 0
+	for _, route := range service.Routes() {
+		if route.Menu == "ClinePassProxy" {
+			menuCount++
+		}
+	}
+	for _, resource := range service.resourcePayload() {
+		if resource["Menu"] == "ClinePassProxy" {
+			menuCount++
+		}
+	}
+	if menuCount != 1 {
+		t.Fatalf("expected exactly one ClinePassProxy menu entry, got %d", menuCount)
+	}
+}
