@@ -371,7 +371,7 @@ func (d *SSEDecoder) Next() (Event, error) {
 	var event Event
 	var data []string
 	for {
-		line, terminated, err := d.readLine()
+		line, _, err := d.readLine()
 		if line != "" {
 			switch {
 			case strings.HasPrefix(line, "data:"):
@@ -393,17 +393,13 @@ func (d *SSEDecoder) Next() (Event, error) {
 		if !errors.Is(err, io.EOF) {
 			return Event{}, err
 		}
-		// A line that reached EOF without its newline is a truncated frame.
-		// Delivering it would let a cut-off response pass as a complete one.
-		// An empty final read is the ordinary end of a well-formed stream.
-		if line != "" && !terminated {
+		// SSE events are terminated by a blank line, not merely by a newline on
+		// the final data line. If EOF arrives while an event is buffered, the
+		// transport was cut before the event boundary and the frame is partial.
+		// Accepting "data: ...\n" at EOF can otherwise turn a truncated
+		// finish_reason chunk into a false success.
+		if line != "" || len(data) > 0 || event.Name != "" {
 			return Event{}, ErrPartialFrame
-		}
-		// End of stream after a terminated line: flush the last frame that the
-		// upstream did not close with a blank line.
-		if len(data) > 0 || event.Name != "" {
-			event.Data = []byte(strings.Join(data, "\n"))
-			return event, nil
 		}
 		return Event{}, io.EOF
 	}

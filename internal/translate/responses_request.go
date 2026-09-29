@@ -111,6 +111,41 @@ func responsesInputMessages(value any, namespace string) ([]any, error) {
 	if items == nil {
 		return nil, nil
 	}
+
+	// Match CPA v8.0.4's ambiguity guard. A missing call_id is only inferred
+	// when there is exactly one unclaimed call/output relationship. With
+	// multiple missing outputs, or one missing output facing multiple unclaimed
+	// calls, guessing would rewrite the prompt history. Those outputs must stay
+	// standalone user content instead.
+	explicitOutputCounts := map[string]int{}
+	callIDs := map[string]bool{}
+	missingOutputIDs := 0
+	for _, raw := range items {
+		item := models.Object(raw)
+		if item == nil {
+			continue
+		}
+		switch strings.TrimSpace(models.String(item["type"])) {
+		case "function_call", "custom_tool_call":
+			if id := responsesCallID(item); id != "" {
+				callIDs[id] = true
+			}
+		case "function_call_output", "custom_tool_call_output":
+			if id := responsesCallID(item); id != "" {
+				explicitOutputCounts[id]++
+			} else {
+				missingOutputIDs++
+			}
+		}
+	}
+	unclaimedCalls := 0
+	for id := range callIDs {
+		if explicitOutputCounts[id] == 0 {
+			unclaimedCalls++
+		}
+	}
+	ambiguousMissingOutputs := missingOutputIDs > 1 || (missingOutputIDs > 0 && unclaimedCalls > 1)
+
 	units := make([]responsesUnit, 0, len(items))
 	for _, raw := range items {
 		item := models.Object(raw)
@@ -119,29 +154,39 @@ func responsesInputMessages(value any, namespace string) ([]any, error) {
 		}
 		switch strings.TrimSpace(models.String(item["type"])) {
 		case "function_call":
+			callID := responsesCallID(item)
+			itemNamespace := strings.TrimSpace(models.String(item["namespace"]))
+			if itemNamespace == "" {
+				itemNamespace = namespace
+			}
 			units = append(units, responsesUnit{
 				kind:   unitToolCall,
-				callID: strings.TrimSpace(models.String(item["call_id"])),
+				callID: callID,
 				call: responsesToolCall(
-					models.String(item["call_id"]),
-					responsesDeclaredToolName(namespace, models.String(item["name"])),
+					callID,
+					responsesDeclaredToolName(itemNamespace, models.String(item["name"])),
 					defaultJSON(models.String(item["arguments"])),
 				),
 			})
 		case "custom_tool_call":
+			callID := responsesCallID(item)
+			itemNamespace := strings.TrimSpace(models.String(item["namespace"]))
+			if itemNamespace == "" {
+				itemNamespace = namespace
+			}
 			units = append(units, responsesUnit{
 				kind:   unitToolCall,
-				callID: strings.TrimSpace(models.String(item["call_id"])),
+				callID: callID,
 				call: responsesToolCall(
-					models.String(item["call_id"]),
-					responsesDeclaredToolName(namespace, models.String(item["name"])),
+					callID,
+					responsesDeclaredToolName(itemNamespace, models.String(item["name"])),
 					customInputArguments(item["input"]),
 				),
 			})
 		case "function_call_output", "custom_tool_call_output":
 			units = append(units, responsesUnit{
 				kind:   unitToolOutput,
-				callID: strings.TrimSpace(models.String(item["call_id"])),
+				callID: responsesCallID(item),
 				output: map[string]any{
 					"role":    "tool",
 					"content": responsesToolOutput(item["output"]),
@@ -162,7 +207,7 @@ func responsesInputMessages(value any, namespace string) ([]any, error) {
 			}
 		}
 	}
-	return responsesAssemble(units), nil
+	return responsesAssemble(units, ambiguousMissingOutputs), nil
 }
 
 // Unit kinds for the Responses input walk.
@@ -201,12 +246,15 @@ func responsesToolCall(callID, name, arguments string) map[string]any {
 // emitted directly after the assistant message that carries its call. A call
 // that has no result in the history is left without one: an incomplete history
 // must not be rewritten, because guessing would change the prompt prefix.
-func responsesAssemble(units []responsesUnit) []any {
+func responsesAssemble(units []responsesUnit, ambiguousMissingOutputs bool) []any {
 	out := make([]any, 0, len(units))
 	pending := make([]any, 0, 4)
 	pendingIDs := make([]string, 0, 4)
 	recent := make([]string, 0, 4)
 	claimed := map[string]bool{}
+	awaiting := map[string]bool{}
+	outputCounts := map[string]int{}
+	ambiguousIDs := map[string]bool{}
 	reasoning := ""
 
 	flush := func() {
@@ -227,6 +275,11 @@ func responsesAssemble(units []responsesUnit) []any {
 					last["reasoning_content"] = combineResponsesReasoning(models.String(last["reasoning_content"]), reasoning)
 				}
 				recent = append(recent[:0], pendingIDs...)
+				for _, id := range pendingIDs {
+					if id != "" {
+						awaiting[id] = true
+					}
+				}
 				pending = pending[:0]
 				pendingIDs = pendingIDs[:0]
 				reasoning = ""
@@ -239,6 +292,11 @@ func responsesAssemble(units []responsesUnit) []any {
 		}
 		out = append(out, message)
 		recent = append(recent[:0], pendingIDs...)
+		for _, id := range pendingIDs {
+			if id != "" {
+				awaiting[id] = true
+			}
+		}
 		pending = pending[:0]
 		pendingIDs = pendingIDs[:0]
 		reasoning = ""
@@ -257,7 +315,24 @@ func responsesAssemble(units []responsesUnit) []any {
 			reasoning = combineResponsesReasoning(reasoning, unit.text)
 		case unitToolOutput:
 			flush()
-			unit.output["tool_call_id"] = responsesOutputCallID(unit.callID, recent, claimed)
+			if unit.callID != "" {
+				outputCounts[unit.callID]++
+				if outputCounts[unit.callID] > 1 {
+					ambiguousIDs[unit.callID] = true
+				}
+			}
+			resolvedID := ""
+			if !(unit.callID == "" && ambiguousMissingOutputs) {
+				resolvedID = responsesOutputCallID(unit.callID, recent, claimed)
+			}
+			if resolvedID == "" || !awaiting[resolvedID] {
+				if content := strings.TrimSpace(models.String(unit.output["content"])); content != "" {
+					out = append(out, map[string]any{"role": "user", "content": content})
+				}
+				continue
+			}
+			unit.output["tool_call_id"] = resolvedID
+			delete(awaiting, resolvedID)
 			out = append(out, unit.output)
 		default:
 			// The assistant text message of a turn carries the reasoning that
@@ -271,7 +346,7 @@ func responsesAssemble(units []responsesUnit) []any {
 		}
 	}
 	flush()
-	return out
+	return alignResponsesToolMessages(out, ambiguousIDs)
 }
 
 // responsesOutputCallID resolves the call a tool result belongs to. A result
@@ -290,6 +365,118 @@ func responsesOutputCallID(callID string, batchIDs []string, claimed map[string]
 		return id
 	}
 	return ""
+}
+
+func responsesCallID(item map[string]any) string {
+	for _, key := range []string{"call_id", "tool_call_id", "callId"} {
+		if id := strings.TrimSpace(models.String(item[key])); id != "" {
+			return id
+		}
+	}
+	id := strings.TrimSpace(models.String(item["id"]))
+	if strings.HasPrefix(id, "fco_") {
+		return ""
+	}
+	return id
+}
+
+func alignResponsesToolMessages(messages []any, extraAmbiguous map[string]bool) []any {
+	if len(messages) <= 1 {
+		return messages
+	}
+	type assistantRecord struct {
+		index   int
+		callIDs []string
+		invalid bool
+	}
+	assistants := make([]assistantRecord, 0)
+	assistantByID := map[string]int{}
+	ambiguous := map[string]bool{}
+	for id := range extraAmbiguous {
+		if strings.TrimSpace(id) != "" {
+			ambiguous[id] = true
+		}
+	}
+	toolIndices := map[string][]int{}
+	for index, raw := range messages {
+		message := models.Object(raw)
+		switch models.String(message["role"]) {
+		case "assistant":
+			calls := models.List(message["tool_calls"])
+			if len(calls) == 0 {
+				continue
+			}
+			record := assistantRecord{index: index}
+			for _, rawCall := range calls {
+				id := strings.TrimSpace(models.String(models.Object(rawCall)["id"]))
+				if id == "" {
+					record.invalid = true
+					continue
+				}
+				if _, exists := assistantByID[id]; exists {
+					ambiguous[id] = true
+				}
+				assistantByID[id] = index
+				record.callIDs = append(record.callIDs, id)
+			}
+			assistants = append(assistants, record)
+		case "tool":
+			id := strings.TrimSpace(models.String(message["tool_call_id"]))
+			if id == "" {
+				continue
+			}
+			toolIndices[id] = append(toolIndices[id], index)
+			if len(toolIndices[id]) > 1 {
+				ambiguous[id] = true
+			}
+		}
+	}
+	moved := map[int]bool{}
+	insert := map[int][]any{}
+	for _, assistant := range assistants {
+		if assistant.invalid || len(assistant.callIDs) == 0 {
+			continue
+		}
+		indices := make([]int, 0, len(assistant.callIDs))
+		eligible := true
+		for _, id := range assistant.callIDs {
+			matches := toolIndices[id]
+			if ambiguous[id] || len(matches) != 1 || matches[0] <= assistant.index {
+				eligible = false
+				break
+			}
+			indices = append(indices, matches[0])
+		}
+		if !eligible {
+			continue
+		}
+		alreadyAdjacent := true
+		for offset, index := range indices {
+			if index != assistant.index+offset+1 {
+				alreadyAdjacent = false
+				break
+			}
+		}
+		if alreadyAdjacent {
+			continue
+		}
+		for _, index := range indices {
+			moved[index] = true
+			insert[assistant.index] = append(insert[assistant.index], messages[index])
+		}
+	}
+	if len(moved) == 0 {
+		return messages
+	}
+	out := make([]any, 0, len(messages))
+	for index, message := range messages {
+		if moved[index] {
+			continue
+		}
+		out = append(out, message)
+		out = append(out, insert[index]...)
+	}
+	return out
 }
 
 func responsesLastAssistant(out []any) (map[string]any, bool) {
@@ -319,8 +506,8 @@ func responsesMessageItem(item map[string]any) map[string]any {
 	if role != "user" && role != "assistant" && role != "system" && role != "developer" {
 		return nil
 	}
-	if role == "developer" || role == "system" {
-		role = "system"
+	if role == "developer" {
+		role = "user"
 	}
 	content := responsesContentParts(item["content"])
 	if content == nil {

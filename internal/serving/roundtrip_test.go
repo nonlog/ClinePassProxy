@@ -466,6 +466,34 @@ func TestPartialSSEFrameIsReportedNotCompleted(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsTruncationWritesErrorEvent(t *testing.T) {
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half\"}}]}\n\n"))
+	}))
+	defer cline.Close()
+
+	server, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	events := readEvents(t, recorder.Body.Bytes())
+	if !strings.Contains(events, `"error"`) {
+		t.Fatalf("truncated Chat Completions stream was not reported:\n%s", events)
+	}
+	if strings.Contains(events, "[DONE]") {
+		t.Fatalf("truncated Chat Completions stream was closed as complete:\n%s", events)
+	}
+	records := server.History.List(1, "")
+	if len(records) != 1 || records[0].Status != http.StatusBadGateway {
+		t.Fatalf("truncated Chat Completions stream recorded as %+v", records)
+	}
+}
+
 func TestResponsesTruncationIsReportedNotCompleted(t *testing.T) {
 	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

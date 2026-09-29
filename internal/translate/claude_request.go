@@ -153,6 +153,9 @@ func ClaudeMessagesToChatCompletions(body []byte, upstreamModel string, stream b
 	if choice, ok := claudeToolChoice(root["tool_choice"]); ok {
 		out["tool_choice"] = choice
 	}
+	if toolChoice := models.Object(root["tool_choice"]); toolChoice != nil && models.Bool(toolChoice["disable_parallel_tool_use"]) {
+		out["parallel_tool_calls"] = false
+	}
 	return out, nil
 }
 
@@ -526,9 +529,24 @@ func claudeTools(value any) []any {
 
 // claudeToolChoice converts Anthropic tool_choice into OpenAI form.
 func claudeToolChoice(value any) (any, bool) {
+	if value == nil {
+		return nil, false
+	}
+	if choice, ok := value.(string); ok {
+		switch strings.TrimSpace(choice) {
+		case "auto":
+			return "auto", true
+		case "any":
+			return "required", true
+		case "none":
+			return "none", true
+		default:
+			return "none", true
+		}
+	}
 	choice := models.Object(value)
 	if choice == nil {
-		return nil, false
+		return "none", true
 	}
 	switch models.String(choice["type"]) {
 	case "auto":
@@ -544,7 +562,7 @@ func claudeToolChoice(value any) (any, bool) {
 		}
 		return map[string]any{"type": "function", "function": map[string]any{"name": name}}, true
 	default:
-		return nil, false
+		return "none", true
 	}
 }
 

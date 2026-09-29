@@ -1,0 +1,19 @@
+{
+  "protocol": "openai-responses",
+  "note": "CPA v8.0.4 maps Responses developer messages to user messages before Chat Completions translation.",
+  "request": {
+    "model": "gpt-5.6",
+    "input": [
+      { "type": "message", "role": "developer", "content": [{ "type": "input_text", "text": "follow this" }] },
+      { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "hello" }] }
+    ]
+  },
+  "expected": {
+    "model": "upstream-model",
+    "stream": true,
+    "messages": [
+      { "role": "user", "content": [{ "type": "text", "text": "follow this" }] },
+      { "role": "user", "content": [{ "type": "text", "text": "hello" }] }
+    ]
+  }
+}

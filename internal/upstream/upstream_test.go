@@ -106,18 +106,12 @@ func TestSSEDecoderRejectsPartialFinalFrame(t *testing.T) {
 	}
 }
 
-func TestSSEDecoderFlushesTerminatedFinalFrameWithoutBlankLine(t *testing.T) {
-	// The line itself arrived intact, only the closing blank line is missing.
+func TestSSEDecoderRejectsFinalFrameWithoutBlankLine(t *testing.T) {
+	// A newline terminates the data line, but only a blank line terminates the
+	// SSE event. EOF here must therefore be treated as truncation.
 	decoder := NewSSEDecoder(strings.NewReader("data: tail\n"), 1<<20)
-	event, err := decoder.Next()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(event.Data) != "tail" {
-		t.Fatalf("final frame = %q", event.Data)
-	}
-	if _, err := decoder.Next(); !errors.Is(err, io.EOF) {
-		t.Fatalf("expected io.EOF after the final frame, got %v", err)
+	if _, err := decoder.Next(); !errors.Is(err, ErrPartialFrame) {
+		t.Fatalf("expected ErrPartialFrame, got %v", err)
 	}
 }
 

@@ -245,7 +245,9 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 		return s.finishStreamFailure(request, err)
 	}
 	if !sawDone && !sawFinish {
-		return s.finishStreamFailure(request, translate.ErrUpstreamTruncated)
+		err := translate.ErrUpstreamTruncated
+		_ = writer.write(request.tracker, [][]byte{translate.ChatStreamError(truncationMessage(err))})
+		return s.finishStreamFailure(request, err)
 	}
 	if err := writer.write(request.tracker, [][]byte{translate.DoneEvent()}); err != nil {
 		return s.finishStreamFailure(request, err)

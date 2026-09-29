@@ -1,0 +1,24 @@
+{
+  "protocol": "claude-messages",
+  "note": "CPA v8.0.4 maps Anthropic tool_choice.disable_parallel_tool_use=true to parallel_tool_calls=false.",
+  "request": {
+    "model": "claude-sonnet-4.6",
+    "max_tokens": 64,
+    "messages": [{ "role": "user", "content": "use one tool at a time" }],
+    "tools": [
+      { "name": "lookup", "description": "lookup", "input_schema": { "type": "object", "properties": {} } }
+    ],
+    "tool_choice": { "type": "auto", "disable_parallel_tool_use": true }
+  },
+  "expected": {
+    "model": "upstream-model",
+    "stream": true,
+    "max_tokens": 64,
+    "messages": [{ "role": "user", "content": "use one tool at a time" }],
+    "tools": [
+      { "type": "function", "function": { "name": "lookup", "description": "lookup", "parameters": { "type": "object", "properties": {} } } }
+    ],
+    "tool_choice": "auto",
+    "parallel_tool_calls": false
+  }
+}

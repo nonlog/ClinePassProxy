@@ -1,6 +1,6 @@
 {
   "protocol": "openai-responses",
-  "note": "CPA v8.0.4 matches results that carry no call_id to the pending calls in order instead of dropping or duplicating them.",
+  "note": "CPA v8.0.4 treats multiple outputs with missing call_id as ambiguous. It removes any guessed IDs and emits those orphan outputs as user content instead of inventing tool_call_id mappings.",
   "request": {
     "model": "gpt-5.6",
     "input": [
@@ -18,20 +18,12 @@
         "role": "assistant",
         "content": "",
         "tool_calls": [
-          {
-            "id": "call_a",
-            "type": "function",
-            "function": { "name": "first", "arguments": "{}" }
-          },
-          {
-            "id": "call_b",
-            "type": "function",
-            "function": { "name": "second", "arguments": "{}" }
-          }
+          { "id": "call_a", "type": "function", "function": { "name": "first", "arguments": "{}" } },
+          { "id": "call_b", "type": "function", "function": { "name": "second", "arguments": "{}" } }
         ]
       },
-      { "role": "tool", "tool_call_id": "call_a", "content": "result one" },
-      { "role": "tool", "tool_call_id": "call_b", "content": "result two" }
+      { "role": "user", "content": "result one" },
+      { "role": "user", "content": "result two" }
     ]
   }
 }
