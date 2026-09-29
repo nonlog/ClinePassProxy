@@ -18,8 +18,11 @@ import (
 	"time"
 )
 
-// Version is the connector release version.
-const Version = "0.1.0"
+// Version is the connector release version. The release workflow injects the
+// git tag; an unstamped build reports the same "0.0.0-dev" the proxy reports so
+// version skew is visible in CPAMP instead of being hidden behind a stale
+// constant.
+var Version = "0.0.0-dev"
 
 // PluginID is the stable plugin identifier.
 const PluginID = "clinepassproxy"
@@ -177,6 +180,7 @@ func (s *Service) Routes() []Route {
 		desc   string
 	}{
 		{"GET", "/v0/management/clinepassproxy/status", "ClinePassProxy health and summary"},
+		{"GET", "/v0/management/clinepassproxy/version", "ClinePassProxy build identity"},
 		{"GET", "/v0/management/clinepassproxy/config", "ClinePassProxy settings"},
 		{"PUT", "/v0/management/clinepassproxy/config", "Update ClinePassProxy settings"},
 		{"GET", "/v0/management/clinepassproxy/credentials", "Credential pool"},
@@ -227,10 +231,7 @@ func (s *Service) HandleManagement(method, path string, query url.Values, header
 	s.mu.RUnlock()
 
 	if strings.HasSuffix(path, "/panel") {
-		s.mu.RLock()
-		base := s.config.ProxyURL
-		s.mu.RUnlock()
-		return http.StatusOK, http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}, []byte(panelHTML(base)), nil
+		return s.panel()
 	}
 
 	target := upstreamPath(path)
@@ -284,6 +285,8 @@ func upstreamPath(path string) string {
 	}
 	rest := strings.TrimPrefix(path, prefix)
 	switch {
+	case rest == "/version":
+		return "/api/version"
 	case rest == "/status":
 		return "/api/status"
 	case rest == "/config":
@@ -310,54 +313,81 @@ func (s *Service) Shutdown() {
 	}
 }
 
-// panelHTML is the browser entry shown inside CPAMP. It embeds the standalone
-// UI so the two surfaces cannot drift apart.
-func panelHTML(proxyURL ...string) string {
-	base := ""
-	if len(proxyURL) > 0 {
-		base = strings.TrimRight(proxyURL[0], "/")
+// panelPrefix is the connector's public path prefix on the CPA host. The
+// browser only ever talks to this prefix; the proxy's in-network address is
+// used server-to-server by the connector.
+const panelPrefix = "/v0/management/clinepassproxy"
+
+// panel serves the standalone UI through CPA.
+//
+// The UI is a single page that calls its own origin's /api/... paths, so it is
+// fetched from the proxy and returned with a small shim that rewrites those
+// calls onto this connector's management routes. The management token stays
+// server-side: the browser never holds it, and the proxy's in-network address
+// never has to resolve from the browser.
+func (s *Service) panel() (int, http.Header, []byte, error) {
+	s.mu.RLock()
+	config := s.config
+	client := s.client
+	s.mu.RUnlock()
+
+	request, err := http.NewRequest(http.MethodGet, strings.TrimRight(config.ProxyURL, "/")+"/", nil)
+	if err != nil {
+		return http.StatusOK, panelHeaders(), []byte(panelErrorHTML(config.ProxyURL, err)), nil
 	}
-	return strings.ReplaceAll(panelTemplate, "{{PROXY_BASE}}", base)
+	request.Header.Set("Accept", "text/html")
+	response, err := client.Do(request)
+	if err != nil {
+		return http.StatusOK, panelHeaders(), []byte(panelErrorHTML(config.ProxyURL, err)), nil
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return http.StatusOK, panelHeaders(), []byte(panelErrorHTML(config.ProxyURL,
+			fmt.Errorf("ClinePassProxy returned HTTP %d", response.StatusCode))), nil
+	}
+	page, err := io.ReadAll(io.LimitReader(response.Body, 4<<20))
+	if err != nil {
+		return http.StatusOK, panelHeaders(), []byte(panelErrorHTML(config.ProxyURL, err)), nil
+	}
+	return http.StatusOK, panelHeaders(), []byte(injectPanelShim(string(page))), nil
 }
 
-const panelTemplate = `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ClinePassProxy</title>
-<style>
-  html, body { margin: 0; height: 100%; background: #0e1116; color: #e6edf3;
-    font: 14px/1.5 ui-sans-serif, system-ui, "Segoe UI", sans-serif; }
-  header { padding: 12px 16px; border-bottom: 1px solid #2a3140; display: flex; gap: 10px; align-items: center; }
-  header b { font-weight: 600; }
-  header span { color: #8b97a8; font-size: 12px; }
-  iframe { border: 0; width: 100%; height: calc(100% - 45px); display: block; background: #0e1116; }
-  a { color: #4c9aff; }
-</style>
-</head>
-<body>
-<header>
-  <b>ClinePassProxy</b>
-  <span id="hint">management console</span>
-  <span style="margin-left:auto"><a id="external" href="#" target="_blank" rel="noreferrer">open standalone UI</a></span>
-</header>
-<iframe id="console" title="ClinePassProxy console"></iframe>
-<script>
-  const base = "{{PROXY_BASE}}";
-  const target = base ? base + "/" : "";
-  const link = document.getElementById("external");
-  const hint = document.getElementById("hint");
-  if (target) {
-    document.getElementById("console").src = target;
-    link.href = target;
-  } else {
-    hint.textContent = "set proxy_url in the connector configuration, then reload";
-    link.style.display = "none";
-  }
-</script>
-</body>
-</html>`
+func panelHeaders() http.Header {
+	return http.Header{"Content-Type": []string{"text/html; charset=utf-8"}}
+}
+
+// injectPanelShim rewrites the UI's own /api/... calls onto the connector.
+func injectPanelShim(page string) string {
+	shim := panelShim()
+	if index := strings.Index(page, "</head>"); index >= 0 {
+		return page[:index] + shim + page[index:]
+	}
+	return shim + page
+}
+
+func panelShim() string {
+	return "<script>(function(){var P=\"" + panelPrefix + "\";var f=window.fetch;" +
+		"window.fetch=function(i,n){if(typeof i===\"string\"&&i.indexOf(\"/api/\")===0){i=P+i.slice(4);}" +
+		"return f.call(this,i,n);};})();</script>"
+}
+
+// panelErrorHTML explains a panel that could not reach the proxy instead of
+// showing a broken frame.
+func panelErrorHTML(proxyURL string, err error) string {
+	return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">" +
+		"<title>ClinePassProxy</title></head><body style=\"font:14px/1.6 ui-sans-serif,system-ui,sans-serif;padding:24px\">" +
+		"<h1 style=\"font-size:16px\">ClinePassProxy console unavailable</h1>" +
+		"<p>The connector could not load the dashboard from <code>" + htmlEscape(proxyURL) + "</code>.</p>" +
+		"<p style=\"color:#b00\">" + htmlEscape(err.Error()) + "</p>" +
+		"<p>Set <code>proxy_url</code> in the connector configuration to an address the CPA host can reach, " +
+		"for example <code>http://127.0.0.1:8788</code> when CPA runs with host networking.</p>" +
+		"</body></html>"
+}
+
+func htmlEscape(value string) string {
+	replacer := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;")
+	return replacer.Replace(value)
+}
 
 func routeOptions(method, path string) map[string]any {
 	return map[string]any{"method": method, "path": path}

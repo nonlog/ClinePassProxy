@@ -70,6 +70,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 			return http.StatusBadGateway, err, true
 		}
 		raw = unwrapCompletionEnvelope(raw)
+		s.observeChunk(request, raw)
 		converted, err := translate.OpenAICompletionToClaude(raw, request.model, request.raw)
 		if err != nil {
 			return http.StatusBadGateway, err, false
@@ -84,6 +85,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 	converter := translate.NewClaudeStreamConverter(request.model, request.raw)
 	writer := newSSEWriter(w)
 	writer.prepare()
+	request.streamed = true
 
 	startFrames, err := converter.Start()
 	if err != nil {
@@ -94,12 +96,15 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 		return statusClientClosed, err, false
 	}
 
-	err = s.consumeUpstream(r, request, stream,
+	_, err = s.consumeUpstream(r, request, stream,
 		func(raw []byte) ([][]byte, error) { return converter.Feed(raw) },
 		func(frames [][]byte) error { return writer.write(request.tracker, frames) },
 		func() ([][]byte, error) { return converter.Done() },
 	)
 	if err != nil {
+		if isTruncatedStream(err) {
+			_ = writer.write(request.tracker, [][]byte{converter.ErrorFrame(truncationMessage(err))})
+		}
 		return s.finishStreamFailure(request, err)
 	}
 	s.observeClaudeUsage(request, converter.Usage())
@@ -134,6 +139,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 			return http.StatusBadGateway, err, true
 		}
 		raw = unwrapCompletionEnvelope(raw)
+		s.observeChunk(request, raw)
 		converted, err := translate.OpenAICompletionToResponses(raw, request.model, request.raw, translated)
 		if err != nil {
 			return http.StatusBadGateway, err, false
@@ -148,6 +154,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 	converter := translate.NewResponsesStreamConverter(request.model, request.raw, translated)
 	writer := newSSEWriter(w)
 	writer.prepare()
+	request.streamed = true
 
 	startFrames, err := converter.Start()
 	if err != nil {
@@ -158,12 +165,15 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 		return statusClientClosed, err, false
 	}
 
-	err = s.consumeUpstream(r, request, stream,
+	_, err = s.consumeUpstream(r, request, stream,
 		func(raw []byte) ([][]byte, error) { return converter.Feed(raw) },
 		func(frames [][]byte) error { return writer.write(request.tracker, frames) },
 		func() ([][]byte, error) { return converter.Done() },
 	)
 	if err != nil {
+		if isTruncatedStream(err) {
+			_ = writer.write(request.tracker, [][]byte{converter.ErrorFrame(truncationMessage(err))})
+		}
 		return s.finishStreamFailure(request, err)
 	}
 	if usage := converter.Usage(); usage != nil {
@@ -214,12 +224,30 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 
 	writer := newSSEWriter(w)
 	writer.prepare()
-	err = s.consumeUpstream(r, request, upstreamStream,
-		func(raw []byte) ([][]byte, error) { return forwardChatFrames(raw, request.model) },
+	request.streamed = true
+	sawFinish := false
+	sawDone, err := s.consumeUpstream(r, request, upstreamStream,
+		func(raw []byte) ([][]byte, error) {
+			if chatChunkFinished(raw) {
+				sawFinish = true
+			}
+			return forwardChatFrames(raw, request.model)
+		},
 		func(frames [][]byte) error { return writer.write(request.tracker, frames) },
-		func() ([][]byte, error) { return [][]byte{translate.DoneEvent()}, nil },
+		nil,
 	)
 	if err != nil {
+		if isTruncatedStream(err) || errors.Is(err, errClientGone) {
+			// Nothing to add: the client is already gone.
+		} else {
+			_ = writer.write(request.tracker, [][]byte{translate.ChatStreamError(truncationMessage(err))})
+		}
+		return s.finishStreamFailure(request, err)
+	}
+	if !sawDone && !sawFinish {
+		return s.finishStreamFailure(request, translate.ErrUpstreamTruncated)
+	}
+	if err := writer.write(request.tracker, [][]byte{translate.DoneEvent()}); err != nil {
 		return s.finishStreamFailure(request, err)
 	}
 	s.finishRequest(request, http.StatusOK, nil)
@@ -232,7 +260,7 @@ const statusClientClosed = 499
 // finishStreamFailure records a stream failure. When the response has not been
 // committed the caller can still retry on another credential.
 func (s *Server) finishStreamFailure(request *requestContext, err error) (int, error, bool) {
-	if errors.Is(err, context.Canceled) || errors.Is(err, upstream.ErrPartialFrame) {
+	if errors.Is(err, context.Canceled) {
 		s.finishRequest(request, statusClientClosed, err)
 		return statusClientClosed, err, false
 	}
@@ -246,6 +274,35 @@ func (s *Server) finishStreamFailure(request *requestContext, err error) (int, e
 	}
 	s.finishRequest(request, http.StatusBadGateway, err)
 	return http.StatusBadGateway, err, false
+}
+
+// isTruncatedStream reports an upstream stream that stopped before the
+// response was complete.
+func isTruncatedStream(err error) bool {
+	return errors.Is(err, translate.ErrUpstreamTruncated) || errors.Is(err, upstream.ErrPartialFrame)
+}
+
+// truncationMessage renders an upstream-compatible explanation for a stream
+// that ended early.
+func truncationMessage(err error) string {
+	if errors.Is(err, upstream.ErrPartialFrame) {
+		return "Cline upstream stream ended in the middle of an event"
+	}
+	return "Cline upstream stream ended before the response completed"
+}
+
+// chatChunkFinished reports whether an upstream chunk carried a finish reason.
+func chatChunkFinished(raw []byte) bool {
+	root, err := models.DecodeObject(raw)
+	if err != nil {
+		return false
+	}
+	for _, rawChoice := range models.List(root["choices"]) {
+		if models.String(models.Object(rawChoice)["finish_reason"]) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // errClientGone reports a downstream write that failed.

@@ -3,6 +3,7 @@ package serving
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -78,12 +79,11 @@ func newTestServer(t *testing.T, baseURL string) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := creds.Upsert(credentials.Record{ID: "test-cred", Label: "test", APIKey: "cline-key", Enabled: true}, false); err != nil {
+	if _, err := creds.Upsert(credentials.Record{ID: "test-cred", Label: "test", APIKey: "cline-key", Enabled: true}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	history := admin.OpenHistory(dir, 200)
 	server := New(store, creds, history)
-	server.SetReady(true, "")
 	return server, server.Handler()
 }
 
@@ -111,12 +111,11 @@ func newTestServerWithCredentials(t *testing.T, baseURL string, ids ...string) (
 		t.Fatal(err)
 	}
 	for _, id := range ids {
-		if _, err := creds.Upsert(credentials.Record{ID: id, Label: id, APIKey: "key-" + id, Enabled: true}, false); err != nil {
+		if _, err := creds.Upsert(credentials.Record{ID: id, Label: id, APIKey: "key-" + id, Enabled: true}, false, false); err != nil {
 			t.Fatal(err)
 		}
 	}
 	server := New(store, creds, admin.OpenHistory(dir, 200))
-	server.SetReady(true, "")
 	return server, server.Handler()
 }
 
@@ -322,7 +321,7 @@ func TestAffinityIsStableAcrossTurns(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"a", "b", "c"} {
-		if _, err := creds.Upsert(credentials.Record{ID: id, Label: id, APIKey: "key-" + id, Enabled: true}, false); err != nil {
+		if _, err := creds.Upsert(credentials.Record{ID: id, Label: id, APIKey: "key-" + id, Enabled: true}, false, false); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -363,13 +362,281 @@ func TestRequestHistoryRecordsStages(t *testing.T) {
 		t.Fatalf("expected one request record, got %d", len(records))
 	}
 	record := records[0]
-	for _, stage := range []string{admin.StageRequestReceived, admin.StageTranslateDone, admin.StageUpstreamRequestStart, admin.StageFirstUpstreamEvent, admin.StageFirstDownstreamWrite, admin.StageStreamComplete} {
+	for _, stage := range []string{admin.StageRequestReceived, admin.StageTranslateDone, admin.StageUpstreamRequestStart, admin.StageFirstUpstreamEvent, admin.StageFirstDownstreamWrite, admin.StageFirstTokenWrite, admin.StageStreamComplete} {
 		if _, present := record.Timings[stage]; !present {
 			t.Fatalf("timing stage %s missing: %v", stage, record.Timings)
 		}
 	}
+	// TTFT must measure the first visible token, not the protocol prologue that
+	// is written before the provider has produced anything.
+	if record.TTFTMS <= 0 || record.TTFTMS < record.Timings[admin.StageFirstUpstreamEvent] {
+		t.Fatalf("ttft = %d, first upstream event at %d", record.TTFTMS, record.Timings[admin.StageFirstUpstreamEvent])
+	}
 	if record.PromptTokens != 5 || record.CompletionToken != 1 {
 		t.Fatalf("usage not recorded: %+v", record)
+	}
+}
+
+func TestClientCancelCancelsUpstream(t *testing.T) {
+	canceled := make(chan struct{})
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		select {
+		case <-r.Context().Done():
+			close(canceled)
+		case <-time.After(15 * time.Second):
+		}
+	}))
+	defer cline.Close()
+
+	_, handler := newTestServer(t, cline.URL)
+	ctx, cancel := context.WithCancel(context.Background())
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body)).WithContext(ctx)
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		cancel()
+	}()
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	select {
+	case <-canceled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream request survived the client disconnecting")
+	}
+}
+
+func TestTruncatedStreamIsReportedNotCompleted(t *testing.T) {
+	// The upstream sends content and closes without a finish reason.
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer cline.Close()
+
+	server, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	events := readEvents(t, recorder.Body.Bytes())
+	if !strings.Contains(events, "event: error") {
+		t.Fatalf("truncated stream was not reported as an error:\n%s", events)
+	}
+	if strings.Contains(events, "message_stop") {
+		t.Fatalf("truncated stream was closed as a completed turn:\n%s", events)
+	}
+	records := server.History.List(1, "")
+	if len(records) != 1 || records[0].Status != http.StatusBadGateway {
+		t.Fatalf("truncated stream recorded as %+v", records)
+	}
+}
+
+func TestPartialSSEFrameIsReportedNotCompleted(t *testing.T) {
+	// The upstream is cut off mid-frame: no closing newline, no [DONE].
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`data: {"choices":[{"index":0,"delta":{"content":"cut"}}]}`))
+	}))
+	defer cline.Close()
+
+	_, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	events := readEvents(t, recorder.Body.Bytes())
+	if !strings.Contains(events, "event: error") {
+		t.Fatalf("partial SSE frame was not reported:\n%s", events)
+	}
+	if strings.Contains(events, "message_stop") {
+		t.Fatalf("partial SSE frame was closed as a completed turn:\n%s", events)
+	}
+}
+
+func TestResponsesTruncationIsReportedNotCompleted(t *testing.T) {
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"half\"}}]}\n\n"))
+	}))
+	defer cline.Close()
+
+	_, handler := newTestServer(t, cline.URL)
+	body := `{"model":"m","stream":true,"input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	events := readEvents(t, recorder.Body.Bytes())
+	if !strings.Contains(events, "response.failed") {
+		t.Fatalf("truncated Responses stream was not reported:\n%s", events)
+	}
+	if strings.Contains(events, "response.completed") {
+		t.Fatalf("truncated Responses stream was closed as complete:\n%s", events)
+	}
+}
+
+func TestCredentialEditKeepsDisabledStateAndClearsProxy(t *testing.T) {
+	cline := stubCline(t, []string{})
+	defer cline.Close()
+	_, handler := newTestServer(t, cline.URL)
+
+	call := func(method, path, body string) (*httptest.ResponseRecorder, map[string]any) {
+		t.Helper()
+		request := httptest.NewRequest(method, path, strings.NewReader(body))
+		request.Header.Set("Authorization", "Bearer management-token")
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		var payload map[string]any
+		_ = json.Unmarshal(recorder.Body.Bytes(), &payload)
+		return recorder, payload
+	}
+
+	recorder, created := call(http.MethodPost, "/api/credentials",
+		`{"label":"secondary","api_key":"secret-key","enabled":false,"proxy_url":"socks5://127.0.0.1:1080"}`)
+	if recorder.Code != http.StatusCreated {
+		t.Fatalf("create status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	id := models.String(created["id"])
+	if id == "" {
+		t.Fatal("created credential has no id")
+	}
+	if enabled, _ := created["enabled"].(bool); enabled {
+		t.Fatal("credential was not created disabled")
+	}
+
+	// The edit form does not send `enabled`; the stored state must survive.
+	recorder, updated := call(http.MethodPut, "/api/credentials/"+id, `{"label":"secondary","api_key":"","proxy_url":""}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	if enabled, _ := updated["enabled"].(bool); enabled {
+		t.Fatalf("editing a disabled credential re-enabled it: %s", recorder.Body.String())
+	}
+	if proxy := models.String(updated["proxy"]); proxy != "" {
+		t.Fatalf("an explicit blank proxy_url did not clear the stored proxy: %q", proxy)
+	}
+
+	// Omitting proxy_url keeps the stored proxy.
+	if recorder, _ = call(http.MethodPut, "/api/credentials/"+id, `{"proxy_url":"http://127.0.0.1:8080"}`); recorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	recorder, updated = call(http.MethodPut, "/api/credentials/"+id, `{"label":"renamed"}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("update status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	if proxy := models.String(updated["proxy"]); proxy != "http://127.0.0.1:8080" {
+		t.Fatalf("an omitted proxy_url dropped the stored proxy: %q", proxy)
+	}
+}
+
+func TestReadinessFollowsCredentialPool(t *testing.T) {
+	cline := stubCline(t, []string{})
+	defer cline.Close()
+
+	dir := t.TempDir()
+	settings := config.Defaults()
+	settings.DataDir = dir
+	settings.BaseURL = cline.URL
+	settings.GatewayKeys = []string{"gateway-key"}
+	settings.ManagementToken = "management-token"
+	store, err := config.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(settings); err != nil {
+		t.Fatal(err)
+	}
+	creds, err := credentials.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, creds, admin.OpenHistory(dir, 50)).Handler()
+
+	ready := func() int {
+		request := httptest.NewRequest(http.MethodGet, "/ready", nil)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		return recorder.Code
+	}
+
+	// Starting with an empty pool must not pin readiness to 503 forever.
+	if status := ready(); status != http.StatusServiceUnavailable {
+		t.Fatalf("empty pool reported ready: %d", status)
+	}
+	if _, err := creds.Upsert(credentials.Record{ID: "late", Label: "late", APIKey: "k", Enabled: true}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	if status := ready(); status != http.StatusOK {
+		t.Fatalf("readiness did not follow the pool: %d", status)
+	}
+	if _, err := creds.SetEnabled("late", false); err != nil {
+		t.Fatal(err)
+	}
+	if status := ready(); status != http.StatusServiceUnavailable {
+		t.Fatalf("disabling the last credential kept the service ready: %d", status)
+	}
+}
+
+func TestInferenceIsClosedWithoutGatewayKey(t *testing.T) {
+	cline := stubCline(t, []string{`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`})
+	defer cline.Close()
+
+	dir := t.TempDir()
+	settings := config.Defaults()
+	settings.DataDir = dir
+	settings.BaseURL = cline.URL
+	settings.ManagementToken = "management-token"
+	store, err := config.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Update(settings); err != nil {
+		t.Fatal(err)
+	}
+	creds, err := credentials.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := creds.Upsert(credentials.Record{ID: "c", Label: "c", APIKey: "k", Enabled: true}, false, false); err != nil {
+		t.Fatal(err)
+	}
+	handler := New(store, creds, admin.OpenHistory(dir, 50)).Handler()
+
+	body := `{"model":"m","messages":[{"role":"user","content":"hi"}]}`
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("inference without a gateway key returned %d", recorder.Code)
+	}
+
+	// The explicit opt-out re-opens the data plane.
+	current := store.Get()
+	current.AllowUnauthenticated = true
+	if _, err := store.Update(current); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code == http.StatusServiceUnavailable || recorder.Code == http.StatusUnauthorized {
+		t.Fatalf("allow_unauthenticated did not open the data plane: %d", recorder.Code)
 	}
 }
 

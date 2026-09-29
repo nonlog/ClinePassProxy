@@ -34,9 +34,13 @@ type Config struct {
 	BaseURL string `json:"base_url"`
 
 	// GatewayKeys authenticate inference clients (NewAPI channel #53).
-	// An empty list disables inference authentication, which is only
-	// appropriate when another component already enforces it.
+	// An empty list closes the inference API unless AllowUnauthenticated is set.
 	GatewayKeys []string `json:"gateway_keys"`
+
+	// AllowUnauthenticated re-opens the inference API when GatewayKeys is empty.
+	// It is an explicit opt-in because the data plane bills a paid Cline account
+	// and must never be world-reachable by accident.
+	AllowUnauthenticated bool `json:"allow_unauthenticated"`
 
 	// ManagementToken authenticates the management API and web UI.
 	// It is generated on first start when left empty.

@@ -25,8 +25,12 @@ const (
 	StageFirstUpstreamEvent   = "first_upstream_event"
 	StageFirstProtocolEvent   = "first_protocol_event"
 	StageFirstDownstreamWrite = "first_downstream_write"
-	StageStreamComplete       = "stream_complete"
-	StageRequestComplete      = "request_complete"
+	// StageFirstTokenWrite marks the write that carried the first visible token.
+	// It is the only honest time-to-first-token: the protocol prologue frames
+	// (message_start, response.created) are written long before any content.
+	StageFirstTokenWrite = "first_token_write"
+	StageStreamComplete  = "stream_complete"
+	StageRequestComplete = "request_complete"
 )
 
 // Record is one completed or failed request.
@@ -166,10 +170,10 @@ func (t *Tracker) Finish(status int, err error) Record {
 	if record.DurationMS > 0 && record.CompletionToken > 0 {
 		record.EndToEndTPS = float64(record.CompletionToken) / (float64(record.DurationMS) / 1000)
 	}
-	if value, ok := record.Timings[StageFirstDownstreamWrite]; ok {
+	if value, ok := record.Timings[StageFirstTokenWrite]; ok {
 		record.TTFTMS = value
 	}
-	if value, ok := record.Timings[StageFirstProtocolEvent]; ok {
+	if value, ok := record.Timings[StageFirstUpstreamEvent]; ok {
 		record.ProviderTTFTMS = value
 	}
 	t.completed = true

@@ -1,0 +1,17 @@
+{
+  "protocol": "claude-messages",
+  "note": "CPA v8.0.4 wraps a plain string system value in the same single text block it would use for an array, so the two forms translate identically.",
+  "request": {
+    "model": "claude-sonnet-4.6",
+    "system": "Be terse.",
+    "messages": [{ "role": "user", "content": "hi" }]
+  },
+  "expected": {
+    "model": "upstream-model",
+    "stream": true,
+    "messages": [
+      { "role": "system", "content": [{ "type": "text", "text": "Be terse." }] },
+      { "role": "user", "content": "hi" }
+    ]
+  }
+}

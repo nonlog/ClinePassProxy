@@ -59,11 +59,6 @@ func main() {
 	history := admin.OpenHistory(settings.Get().DataDir, settings.Get().LogRetention)
 
 	server := serving.New(settings, store, history)
-	reason := ""
-	if len(store.Enabled()) == 0 {
-		reason = "no enabled Cline credential is configured"
-	}
-	server.SetReady(reason == "", reason)
 
 	httpServer := &http.Server{
 		Addr:              listen,

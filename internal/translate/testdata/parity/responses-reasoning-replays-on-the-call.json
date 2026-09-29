@@ -1,0 +1,31 @@
+{
+  "protocol": "openai-responses",
+  "note": "CPA v8.0.4 replays a reasoning item as reasoning_content on the assistant message that carries the tool calls it produced.",
+  "request": {
+    "model": "gpt-5.6",
+    "input": [
+      { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "weighing options" }] },
+      { "type": "function_call", "call_id": "call_a", "name": "lookup", "arguments": "{}" },
+      { "type": "function_call_output", "call_id": "call_a", "output": "ok" }
+    ]
+  },
+  "expected": {
+    "model": "upstream-model",
+    "stream": true,
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "",
+        "reasoning_content": "weighing options",
+        "tool_calls": [
+          {
+            "id": "call_a",
+            "type": "function",
+            "function": { "name": "lookup", "arguments": "{}" }
+          }
+        ]
+      },
+      { "role": "tool", "tool_call_id": "call_a", "content": "ok" }
+    ]
+  }
+}

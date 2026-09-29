@@ -1,11 +1,70 @@
 package upstream
 
 import (
+	"context"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/nonlog/ClinePassProxy/internal/credentials"
 )
+
+func TestJSONJoinsBaseURLPath(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
+	}))
+	defer server.Close()
+
+	for _, base := range []string{server.URL + "/api/v1", server.URL + "/api/v1/"} {
+		client := New(base)
+		if _, _, err := client.JSON(context.Background(), credentials.Record{APIKey: "k"}, "/users/me/plan/usage-limits", time.Second); err != nil {
+			t.Fatalf("base %q: %v", base, err)
+		}
+		if gotPath != "/api/v1/users/me/plan/usage-limits" {
+			t.Fatalf("base %q produced path %q", base, gotPath)
+		}
+	}
+}
+
+func TestClientBaseURLIsSafeForConcurrentUse(t *testing.T) {
+	// dispatch() repoints the shared client on every request while other
+	// requests are reading the same field; run it under -race.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL)
+	var wait sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			for iteration := 0; iteration < 20; iteration++ {
+				client.SetBaseURL(server.URL)
+				stream, err := client.ChatCompletions(context.Background(), credentials.Record{APIKey: "k"}, ChatRequest{Body: []byte(`{}`)})
+				if err != nil {
+					continue
+				}
+				stream.Close()
+				_ = client.BaseURL()
+			}
+		}()
+	}
+	wait.Wait()
+}
 
 func TestSSEDecoderHandlesArbitraryBoundaries(t *testing.T) {
 	stream := "event: message\ndata: {\"a\":1}\n\ndata: [DONE]\n\n"
@@ -38,8 +97,18 @@ func TestSSEDecoderMultilineDataAndCRLF(t *testing.T) {
 	}
 }
 
-func TestSSEDecoderFlushesFinalFrameWithoutBlankLine(t *testing.T) {
+func TestSSEDecoderRejectsPartialFinalFrame(t *testing.T) {
+	// A final line that ran into EOF was cut mid-frame; delivering it would let
+	// a truncated stream look complete.
 	decoder := NewSSEDecoder(strings.NewReader("data: tail"), 1<<20)
+	if _, err := decoder.Next(); !errors.Is(err, ErrPartialFrame) {
+		t.Fatalf("expected ErrPartialFrame, got %v", err)
+	}
+}
+
+func TestSSEDecoderFlushesTerminatedFinalFrameWithoutBlankLine(t *testing.T) {
+	// The line itself arrived intact, only the closing blank line is missing.
+	decoder := NewSSEDecoder(strings.NewReader("data: tail\n"), 1<<20)
 	event, err := decoder.Next()
 	if err != nil {
 		t.Fatal(err)

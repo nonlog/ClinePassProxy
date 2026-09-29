@@ -2,6 +2,7 @@ package translate
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -124,6 +125,11 @@ func TestClaudeStreamConverterRestoresSanitizedToolName(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	closing, err := converter.Feed([]byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames = append(frames, closing...)
 	done, err := converter.Done()
 	if err != nil {
 		t.Fatal(err)
@@ -135,23 +141,22 @@ func TestClaudeStreamConverterRestoresSanitizedToolName(t *testing.T) {
 	}
 }
 
-func TestClaudeStreamConverterTruncationWouldBeVisible(t *testing.T) {
-	// A stream that ends without a finish_reason must still emit a terminal
-	// frame rather than leaving the client without stop_reason.
+func TestClaudeStreamConverterRefusesToCompleteTruncatedStream(t *testing.T) {
+	// A stream that ends without a finish_reason did not complete. Synthesising
+	// end_turn here would report a cut-off answer as a finished turn.
 	converter := NewClaudeStreamConverter("m", nil)
 	if _, err := converter.Feed([]byte(`{"choices":[{"index":0,"delta":{"content":"partial"}}]}`)); err != nil {
 		t.Fatal(err)
 	}
-	done, err := converter.Done()
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined := string(strings.Join(framesToStrings(done), ""))
-	if !strings.Contains(joined, `"stop_reason":"end_turn"`) {
-		t.Fatalf("terminal frame missing stop_reason:\n%s", joined)
+	if _, err := converter.Done(); !errors.Is(err, ErrUpstreamTruncated) {
+		t.Fatalf("Done() = %v, want ErrUpstreamTruncated", err)
 	}
 	if converter.FinishReason() != "" {
 		t.Fatalf("finish reason should still be empty, got %q", converter.FinishReason())
+	}
+	// The client still learns that the stream failed instead of ending silently.
+	if frame := string(converter.ErrorFrame("truncated")); !strings.Contains(frame, "event: error") {
+		t.Fatalf("error frame = %q", frame)
 	}
 }
 

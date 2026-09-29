@@ -136,7 +136,11 @@ func Open(dataDir string) (*Store, error) {
 func (s *Store) Path() string { return s.path }
 
 // Upsert creates or replaces a credential. An empty ID creates a new record.
-func (s *Store) Upsert(record Record, keepSecret bool) (Record, error) {
+// keepSecret keeps the stored API key when the incoming record omits it;
+// keepProxy keeps the stored proxy URL when the incoming record omits it. Both
+// are false for a create, so "leave the field blank" cannot silently restore or
+// silently erase stored state.
+func (s *Store) Upsert(record Record, keepSecret, keepProxy bool) (Record, error) {
 	record.ID = strings.TrimSpace(record.ID)
 	record.Label = strings.TrimSpace(record.Label)
 	record.APIKey = strings.TrimSpace(record.APIKey)
@@ -163,7 +167,7 @@ func (s *Store) Upsert(record Record, keepSecret bool) (Record, error) {
 		if record.Label == "" {
 			record.Label = existing.Label
 		}
-		if keepSecret && record.ProxyURL == "" {
+		if keepProxy && record.ProxyURL == "" {
 			record.ProxyURL = existing.ProxyURL
 		}
 		record.CreatedAt = existing.CreatedAt

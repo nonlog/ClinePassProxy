@@ -56,6 +56,10 @@ The management token is generated on first start and written to
 `<data-dir>/config.json`. A gateway key never authenticates management, and a
 management token never authenticates inference.
 
+With no gateway key configured the inference endpoints are closed and `/ready`
+reports 503. `allow_unauthenticated: true` re-opens them for a deployment where
+another component already authenticates callers.
+
 ## Configuration
 
 | Environment variable | Default | Meaning |
@@ -136,6 +140,27 @@ The suite covers Claude Messages and Responses conversion, streamed tool calls,
 thinking blocks, usage and cache tokens, arbitrary SSE read boundaries, SSE frame
 limits, credential affinity stability, failover, request diagnostics and the
 separation between management and gateway authentication.
+
+### Translation parity
+
+`internal/translate/testdata/parity/` is a fixture corpus that pins the request
+translation rules shared with CPA v8.0.4, one file per rule, each with the reason
+the rule matters for the prompt cache. `TestTranslationParityFixtures` compares
+the complete translated Chat Completions body, so a shape change fails the test
+instead of passing as "semantically equivalent".
+
+Pinned today: Anthropic `system` stays an ordered list of text blocks with the
+Claude Code attribution block dropped; parallel Responses calls from one turn
+become a single assistant message with every tool result directly after it; tool
+calls merge back into the assistant text message that produced them; results
+without a `call_id` pair with the calls of the batch they follow, in order; and
+an incomplete history is never rewritten.
+
+Not pinned, and therefore not claimed: CPA's rewriting of ambiguous duplicate
+call ids, its `[reasoning unavailable]` fallback text, and the Responses
+namespace mapping beyond the flatten/restore pair already covered by the stream
+converter tests. Adding a rule here means adding a fixture with the reference
+behaviour, not just a passing assertion.
 
 ## Rollback
 

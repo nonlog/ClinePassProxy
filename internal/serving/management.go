@@ -45,34 +45,36 @@ func (s *Server) management(next http.Handler) http.Handler {
 // configView is the management projection of the settings. It never carries the
 // management token or a full gateway key.
 type configView struct {
-	DataDir             string         `json:"data_dir"`
-	BaseURL             string         `json:"base_url"`
-	GatewayKeys         []string       `json:"gateway_keys"`
-	GatewayKeyCount     int            `json:"gateway_key_count"`
-	ManagementUser      string         `json:"management_user"`
-	Models              []models.Entry `json:"models"`
-	TimeoutSeconds      int            `json:"timeout_seconds"`
-	MaxResponseBytes    int64          `json:"max_response_bytes"`
-	LogRetention        int            `json:"log_retention"`
-	RetryFailover       int            `json:"retry_failover"`
-	Affinity            string         `json:"affinity"`
-	AffinityHeader      string         `json:"affinity_header"`
-	RequestLogBodyBytes int            `json:"request_log_body_bytes"`
+	DataDir              string         `json:"data_dir"`
+	BaseURL              string         `json:"base_url"`
+	GatewayKeys          []string       `json:"gateway_keys"`
+	GatewayKeyCount      int            `json:"gateway_key_count"`
+	AllowUnauthenticated bool           `json:"allow_unauthenticated"`
+	ManagementUser       string         `json:"management_user"`
+	Models               []models.Entry `json:"models"`
+	TimeoutSeconds       int            `json:"timeout_seconds"`
+	MaxResponseBytes     int64          `json:"max_response_bytes"`
+	LogRetention         int            `json:"log_retention"`
+	RetryFailover        int            `json:"retry_failover"`
+	Affinity             string         `json:"affinity"`
+	AffinityHeader       string         `json:"affinity_header"`
+	RequestLogBodyBytes  int            `json:"request_log_body_bytes"`
 }
 
 type configUpdate struct {
-	BaseURL             *string         `json:"base_url"`
-	GatewayKeys         *[]string       `json:"gateway_keys"`
-	ManagementToken     *string         `json:"management_token"`
-	ManagementUser      *string         `json:"management_user"`
-	Models              *[]models.Entry `json:"models"`
-	TimeoutSeconds      *int            `json:"timeout_seconds"`
-	MaxResponseBytes    *int64          `json:"max_response_bytes"`
-	LogRetention        *int            `json:"log_retention"`
-	RetryFailover       *int            `json:"retry_failover"`
-	Affinity            *string         `json:"affinity"`
-	AffinityHeader      *string         `json:"affinity_header"`
-	RequestLogBodyBytes *int            `json:"request_log_body_bytes"`
+	BaseURL              *string         `json:"base_url"`
+	GatewayKeys          *[]string       `json:"gateway_keys"`
+	AllowUnauthenticated *bool           `json:"allow_unauthenticated"`
+	ManagementToken      *string         `json:"management_token"`
+	ManagementUser       *string         `json:"management_user"`
+	Models               *[]models.Entry `json:"models"`
+	TimeoutSeconds       *int            `json:"timeout_seconds"`
+	MaxResponseBytes     *int64          `json:"max_response_bytes"`
+	LogRetention         *int            `json:"log_retention"`
+	RetryFailover        *int            `json:"retry_failover"`
+	Affinity             *string         `json:"affinity"`
+	AffinityHeader       *string         `json:"affinity_header"`
+	RequestLogBodyBytes  *int            `json:"request_log_body_bytes"`
 }
 
 func viewOf(settings config.Config) configView {
@@ -81,19 +83,20 @@ func viewOf(settings config.Config) configView {
 		keys = append(keys, credentials.MaskSecret(key))
 	}
 	return configView{
-		DataDir:             settings.DataDir,
-		BaseURL:             settings.BaseURL,
-		GatewayKeys:         keys,
-		GatewayKeyCount:     len(settings.GatewayKeys),
-		ManagementUser:      settings.ManagementUser,
-		Models:              settings.Models,
-		TimeoutSeconds:      settings.TimeoutSeconds,
-		MaxResponseBytes:    settings.MaxResponseBytes,
-		LogRetention:        settings.LogRetention,
-		RetryFailover:       settings.RetryFailover,
-		Affinity:            settings.Affinity,
-		AffinityHeader:      settings.AffinityHeader,
-		RequestLogBodyBytes: settings.RequestLogBodyBytes,
+		DataDir:              settings.DataDir,
+		BaseURL:              settings.BaseURL,
+		GatewayKeys:          keys,
+		GatewayKeyCount:      len(settings.GatewayKeys),
+		AllowUnauthenticated: settings.AllowUnauthenticated,
+		ManagementUser:       settings.ManagementUser,
+		Models:               settings.Models,
+		TimeoutSeconds:       settings.TimeoutSeconds,
+		MaxResponseBytes:     settings.MaxResponseBytes,
+		LogRetention:         settings.LogRetention,
+		RetryFailover:        settings.RetryFailover,
+		Affinity:             settings.Affinity,
+		AffinityHeader:       settings.AffinityHeader,
+		RequestLogBodyBytes:  settings.RequestLogBodyBytes,
 	}
 }
 
@@ -113,6 +116,9 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if update.GatewayKeys != nil {
 		current.GatewayKeys = *update.GatewayKeys
+	}
+	if update.AllowUnauthenticated != nil {
+		current.AllowUnauthenticated = *update.AllowUnauthenticated
 	}
 	if update.ManagementToken != nil && strings.TrimSpace(*update.ManagementToken) != "" {
 		current.ManagementToken = strings.TrimSpace(*update.ManagementToken)
@@ -187,11 +193,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 // ---------------------------------------------------------------- credentials
 
 type credentialPayload struct {
-	ID       string `json:"id"`
-	Label    string `json:"label"`
-	APIKey   string `json:"api_key"`
-	Enabled  *bool  `json:"enabled"`
-	ProxyURL string `json:"proxy_url"`
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	APIKey  string `json:"api_key"`
+	Enabled *bool  `json:"enabled"`
+	// ProxyURL is a pointer so an omitted field keeps the stored proxy while an
+	// explicit empty string clears it, which is what the UI promises.
+	ProxyURL *string `json:"proxy_url"`
 }
 
 func (s *Server) handleListCredentials(w http.ResponseWriter, _ *http.Request) {
@@ -216,8 +224,8 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		Label:    payload.Label,
 		APIKey:   payload.APIKey,
 		Enabled:  enabled,
-		ProxyURL: payload.ProxyURL,
-	}, false)
+		ProxyURL: stringValue(payload.ProxyURL),
+	}, false, false)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -241,17 +249,24 @@ func (s *Server) handleUpdateCredential(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
-	if _, ok := s.Creds.Get(id); !ok {
+	existing, ok := s.Creds.Get(id)
+	if !ok {
 		writeError(w, http.StatusNotFound, "credential not found")
 		return
+	}
+	// An omitted `enabled` means "leave it as it is". Defaulting to true here
+	// silently re-enabled disabled credentials on every edit.
+	enabled := existing.Enabled
+	if payload.Enabled != nil {
+		enabled = *payload.Enabled
 	}
 	record, err := s.Creds.Upsert(credentials.Record{
 		ID:       id,
 		Label:    payload.Label,
 		APIKey:   payload.APIKey,
-		Enabled:  payload.Enabled == nil || *payload.Enabled,
-		ProxyURL: payload.ProxyURL,
-	}, true)
+		Enabled:  enabled,
+		ProxyURL: stringValue(payload.ProxyURL),
+	}, true, payload.ProxyURL == nil)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -485,6 +500,15 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max] + "…"
+}
+
+// stringValue dereferences an optional JSON string, treating an omitted field
+// as the empty value.
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // testCredential issues a minimal completion request against Cline.

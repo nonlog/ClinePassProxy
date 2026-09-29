@@ -1,11 +1,45 @@
 package affinity
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/nonlog/ClinePassProxy/internal/credentials"
 )
+
+func TestSessionAffinitySurvivesPoolChange(t *testing.T) {
+	full := []credentials.Record{
+		{ID: "a", Label: "a", Enabled: true},
+		{ID: "b", Label: "b", Enabled: true},
+		{ID: "c", Label: "c", Enabled: true},
+		{ID: "d", Label: "d", Enabled: true},
+	}
+	// The same pool after "c" is disabled or deleted.
+	reduced := []credentials.Record{full[0], full[1], full[3]}
+
+	selector := NewSelector()
+	moved := 0
+	const total = 300
+	for i := 0; i < total; i++ {
+		key := fmt.Sprintf("prompt-cache-key-%d", i)
+		beforeIndex, before := selector.Select("session", key, full, 0, nil)
+		afterIndex, after := selector.Select("session", key, reduced, 0, nil)
+		if before.CredentialID == after.CredentialID {
+			continue
+		}
+		moved++
+		if full[beforeIndex].ID != "c" {
+			t.Fatalf("session %s moved off a healthy credential: %s -> %s", key, before.CredentialID, after.CredentialID)
+		}
+		if reduced[afterIndex].ID == "c" {
+			t.Fatalf("removed credential was still selected for %s", key)
+		}
+	}
+	if moved == 0 || moved > total/2 {
+		t.Fatalf("pool change remapped %d of %d sessions", moved, total)
+	}
+}
 
 func farFuture() time.Time { return time.Now().Add(time.Hour) }
 

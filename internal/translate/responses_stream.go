@@ -620,6 +620,26 @@ func (c *ResponsesStreamConverter) Usage() map[string]any {
 // Identifiers of the collected response, for diagnostics.
 func (c *ResponsesStreamConverter) ResponseID() string { return c.responseID }
 
+// ErrorFrame renders the Responses `response.failed` event that terminates a
+// stream the proxy could not complete.
+func (c *ResponsesStreamConverter) ErrorFrame(message string) []byte {
+	response := map[string]any{
+		"id": c.responseID, "object": "response", "created_at": c.created, "status": "failed",
+		"background": false, "error": map[string]any{"code": "upstream_error", "message": message},
+		"output": c.completedOutput(),
+	}
+	if model := c.requestModel(); model != "" {
+		response["model"] = model
+	}
+	frame, err := SSEEvent("response.failed", map[string]any{
+		"type": "response.failed", "sequence_number": c.nextSeq(), "response": response,
+	})
+	if err != nil {
+		return []byte("event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\"}}\n\n")
+	}
+	return frame
+}
+
 func (c *ResponsesStreamConverter) completedOutput() []any {
 	type indexed struct {
 		index int
@@ -709,7 +729,9 @@ func (c *ResponsesStreamConverter) completedResponse() map[string]any {
 	return response
 }
 
-// Done emits the terminal response.completed or response.incomplete frame.
+// Done emits the terminal response.completed or response.incomplete frame. An
+// upstream stream that never reported a finish reason did not complete, so it
+// is reported as a failure instead of being closed as a healthy response.
 func (c *ResponsesStreamConverter) Done() ([][]byte, error) {
 	if c.completed {
 		return nil, nil
@@ -717,6 +739,9 @@ func (c *ResponsesStreamConverter) Done() ([][]byte, error) {
 	var out [][]byte
 	if !c.started {
 		return nil, errResponsesNoOutput
+	}
+	if c.finishReason == "" {
+		return nil, ErrUpstreamTruncated
 	}
 	if err := c.finalizeOpenItems(&out); err != nil {
 		return nil, err

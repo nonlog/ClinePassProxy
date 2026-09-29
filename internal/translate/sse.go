@@ -2,8 +2,15 @@ package translate
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
+
+// ErrUpstreamTruncated reports an upstream stream that ended before the
+// response finished. Silently synthesising a normal terminal frame would let a
+// cut-off answer reach the client as a complete one, so the converters refuse
+// to do it and the caller reports the failure instead.
+var ErrUpstreamTruncated = errors.New("upstream stream ended before the response completed")
 
 // SSEEvent renders one Server-Sent Event frame.
 func SSEEvent(event string, data map[string]any) ([]byte, error) {
@@ -38,3 +45,16 @@ func ChatSSEEvent(data map[string]any) ([]byte, error) {
 
 // DoneEvent is the OpenAI-compatible terminal frame.
 func DoneEvent() []byte { return []byte("data: [DONE]\n\n") }
+
+// ChatStreamError renders the error frame that replaces the terminal [DONE]
+// when a Chat Completions stream cannot be completed. The client must not be
+// able to mistake a truncated answer for a finished one.
+func ChatStreamError(message string) []byte {
+	body, err := json.Marshal(map[string]any{
+		"error": map[string]any{"message": message, "type": "clinepassproxy_error"},
+	})
+	if err != nil {
+		return []byte("data: {\"error\":{\"message\":\"upstream stream truncated\"}}\n\n")
+	}
+	return []byte(fmt.Sprintf("data: %s\n\n", body))
+}

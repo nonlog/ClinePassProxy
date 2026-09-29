@@ -95,6 +95,14 @@ func responsesReasoningEffort(value any) string {
 
 // responsesInputMessages converts the Responses `input` value into Chat
 // Completions messages.
+//
+// The Responses API sends a model turn as a flat list (reasoning, message,
+// function_call, function_call_output, ...). Chat Completions requires each
+// `tool` message to directly follow the assistant message that carries the
+// matching `tool_calls`, and requires parallel calls from one turn to live in a
+// single assistant message. Rebuilding that shape is what keeps the upstream
+// prompt identical to the turn the provider produced, which is what the prompt
+// cache is keyed on.
 func responsesInputMessages(value any, namespace string) ([]any, error) {
 	if text, ok := value.(string); ok {
 		return []any{map[string]any{"role": "user", "content": text}}, nil
@@ -103,70 +111,207 @@ func responsesInputMessages(value any, namespace string) ([]any, error) {
 	if items == nil {
 		return nil, nil
 	}
-	messages := make([]any, 0, len(items))
+	units := make([]responsesUnit, 0, len(items))
 	for _, raw := range items {
 		item := models.Object(raw)
 		if item == nil {
 			continue
 		}
 		switch strings.TrimSpace(models.String(item["type"])) {
-		case "message", "":
-			message := responsesMessageItem(item)
-			if message != nil {
-				messages = append(messages, message)
-			}
 		case "function_call":
-			messages = append(messages, map[string]any{
-				"role":    "assistant",
-				"content": "",
-				"tool_calls": []any{map[string]any{
-					"id":   models.String(item["call_id"]),
-					"type": "function",
-					"function": map[string]any{
-						"name":      responsesDeclaredToolName(namespace, models.String(item["name"])),
-						"arguments": defaultJSON(models.String(item["arguments"])),
-					},
-				}},
+			units = append(units, responsesUnit{
+				kind:   unitToolCall,
+				callID: strings.TrimSpace(models.String(item["call_id"])),
+				call: responsesToolCall(
+					models.String(item["call_id"]),
+					responsesDeclaredToolName(namespace, models.String(item["name"])),
+					defaultJSON(models.String(item["arguments"])),
+				),
 			})
 		case "custom_tool_call":
-			messages = append(messages, map[string]any{
-				"role":    "assistant",
-				"content": "",
-				"tool_calls": []any{map[string]any{
-					"id":   models.String(item["call_id"]),
-					"type": "function",
-					"function": map[string]any{
-						"name":      responsesDeclaredToolName(namespace, models.String(item["name"])),
-						"arguments": customInputArguments(item["input"]),
-					},
-				}},
+			units = append(units, responsesUnit{
+				kind:   unitToolCall,
+				callID: strings.TrimSpace(models.String(item["call_id"])),
+				call: responsesToolCall(
+					models.String(item["call_id"]),
+					responsesDeclaredToolName(namespace, models.String(item["name"])),
+					customInputArguments(item["input"]),
+				),
 			})
 		case "function_call_output", "custom_tool_call_output":
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": models.String(item["call_id"]),
-				"content":      responsesToolOutput(item["output"]),
+			units = append(units, responsesUnit{
+				kind:   unitToolOutput,
+				callID: strings.TrimSpace(models.String(item["call_id"])),
+				output: map[string]any{
+					"role":    "tool",
+					"content": responsesToolOutput(item["output"]),
+				},
 			})
 		case "reasoning":
-			// Provider-private reasoning items are replayed as assistant text-free
-			// context only when they carry plain text.
+			// Provider-private reasoning items are replayed only as the plain text
+			// they carry; encrypted content is not portable.
 			if text := responsesSummaryText(item["summary"]); text != "" {
-				messages = append(messages, map[string]any{
-					"role":              "assistant",
-					"content":           "",
-					"reasoning_content": text,
-				})
+				units = append(units, responsesUnit{kind: unitReasoning, text: text})
 			}
 		case "additional_tools":
 			// Tool declarations carried inside the input stream are handled by the
 			// caller through the top-level tool list.
 		default:
 			if message := responsesMessageItem(item); message != nil {
-				messages = append(messages, message)
+				units = append(units, responsesUnit{kind: unitMessage, message: message})
 			}
 		}
 	}
-	return messages, nil
+	return responsesAssemble(units), nil
+}
+
+// Unit kinds for the Responses input walk.
+const (
+	unitMessage = iota
+	unitToolCall
+	unitToolOutput
+	unitReasoning
+)
+
+// responsesUnit is one converted item of the Responses input list.
+type responsesUnit struct {
+	kind    int
+	callID  string
+	message map[string]any
+	call    map[string]any
+	output  map[string]any
+	text    string
+}
+
+func responsesToolCall(callID, name, arguments string) map[string]any {
+	return map[string]any{
+		"id":   callID,
+		"type": "function",
+		"function": map[string]any{
+			"name":      name,
+			"arguments": arguments,
+		},
+	}
+}
+
+// responsesAssemble rebuilds Chat Completions message order from the flat
+// Responses item list.
+//
+// Consecutive tool calls become one assistant message, and each tool result is
+// emitted directly after the assistant message that carries its call. A call
+// that has no result in the history is left without one: an incomplete history
+// must not be rewritten, because guessing would change the prompt prefix.
+func responsesAssemble(units []responsesUnit) []any {
+	out := make([]any, 0, len(units))
+	pending := make([]any, 0, 4)
+	pendingIDs := make([]string, 0, 4)
+	recent := make([]string, 0, 4)
+	claimed := map[string]bool{}
+	reasoning := ""
+
+	flush := func() {
+		if len(pending) == 0 {
+			if reasoning != "" {
+				out = append(out, map[string]any{"role": "assistant", "content": "", "reasoning_content": reasoning})
+				reasoning = ""
+			}
+			return
+		}
+		calls := append([]any{}, pending...)
+		// A text message produced by the same turn keeps its tool calls in one
+		// assistant message instead of splitting the turn in two.
+		if last, ok := responsesLastAssistant(out); ok {
+			if _, hasCalls := last["tool_calls"]; !hasCalls {
+				last["tool_calls"] = calls
+				if reasoning != "" {
+					last["reasoning_content"] = combineResponsesReasoning(models.String(last["reasoning_content"]), reasoning)
+				}
+				recent = append(recent[:0], pendingIDs...)
+				pending = pending[:0]
+				pendingIDs = pendingIDs[:0]
+				reasoning = ""
+				return
+			}
+		}
+		message := map[string]any{"role": "assistant", "content": "", "tool_calls": calls}
+		if reasoning != "" {
+			message["reasoning_content"] = reasoning
+		}
+		out = append(out, message)
+		recent = append(recent[:0], pendingIDs...)
+		pending = pending[:0]
+		pendingIDs = pendingIDs[:0]
+		reasoning = ""
+	}
+
+	for _, unit := range units {
+		switch unit.kind {
+		case unitToolCall:
+			if len(pending) == 0 {
+				recent = recent[:0]
+				claimed = map[string]bool{}
+			}
+			pending = append(pending, unit.call)
+			pendingIDs = append(pendingIDs, unit.callID)
+		case unitReasoning:
+			reasoning = combineResponsesReasoning(reasoning, unit.text)
+		case unitToolOutput:
+			flush()
+			unit.output["tool_call_id"] = responsesOutputCallID(unit.callID, recent, claimed)
+			out = append(out, unit.output)
+		default:
+			// The assistant text message of a turn carries the reasoning that
+			// preceded it.
+			if models.String(unit.message["role"]) == "assistant" && reasoning != "" {
+				unit.message["reasoning_content"] = combineResponsesReasoning(models.String(unit.message["reasoning_content"]), reasoning)
+				reasoning = ""
+			}
+			flush()
+			out = append(out, unit.message)
+		}
+	}
+	flush()
+	return out
+}
+
+// responsesOutputCallID resolves the call a tool result belongs to. A result
+// that arrives without a call id is matched to the first call of the batch it
+// follows that has no result yet, in order.
+func responsesOutputCallID(callID string, batchIDs []string, claimed map[string]bool) string {
+	if callID != "" {
+		claimed[callID] = true
+		return callID
+	}
+	for _, id := range batchIDs {
+		if id == "" || claimed[id] {
+			continue
+		}
+		claimed[id] = true
+		return id
+	}
+	return ""
+}
+
+func responsesLastAssistant(out []any) (map[string]any, bool) {
+	if len(out) == 0 {
+		return nil, false
+	}
+	message, ok := out[len(out)-1].(map[string]any)
+	if !ok || models.String(message["role"]) != "assistant" {
+		return nil, false
+	}
+	return message, true
+}
+
+func combineResponsesReasoning(first, second string) string {
+	switch {
+	case first == "":
+		return second
+	case second == "":
+		return first
+	default:
+		return first + "\n\n" + second
+	}
 }
 
 func responsesMessageItem(item map[string]any) map[string]any {

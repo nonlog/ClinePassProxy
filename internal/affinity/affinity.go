@@ -115,7 +115,7 @@ func (s *Selector) Select(mode, affinityKey string, list []credentials.Record, r
 		return index, Decision{CredentialID: list[index].ID, Label: list[index].Label, Reason: ReasonRoundRobin}
 	default: // session
 		if affinityKey != "" {
-			index := pool[hashIndex(affinityKey, len(pool))]
+			index := rendezvousIndex(affinityKey, pool, list)
 			return index, Decision{CredentialID: list[index].ID, Label: list[index].Label, AffinityKey: affinityKey, Reason: reason}
 		}
 		index := pool[int(rotor%uint64(len(pool)))]
@@ -143,11 +143,25 @@ func (s *Selector) remember(key, credentialID string) {
 	}
 }
 
-func hashIndex(key string, size int) int {
-	if size <= 1 {
-		return 0
+// rendezvousIndex picks the credential with the highest hash for this key.
+//
+// A modulo index (`hash % len(pool)`) remaps almost every session as soon as the
+// pool size changes, so disabling one credential or letting one cool down would
+// drop the prompt cache for sessions bound to every other credential. Highest
+// random weight hashing only moves the sessions that belonged to the credential
+// that actually left the pool.
+func rendezvousIndex(key string, pool []int, list []credentials.Record) int {
+	best := pool[0]
+	bestScore := uint64(0)
+	for position, index := range pool {
+		hasher := fnv.New64a()
+		_, _ = hasher.Write([]byte(key))
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write([]byte(list[index].ID))
+		score := hasher.Sum64()
+		if position == 0 || score > bestScore {
+			best, bestScore = index, score
+		}
 	}
-	hasher := fnv.New64a()
-	_, _ = hasher.Write([]byte(key))
-	return int(hasher.Sum64() % uint64(size))
+	return best
 }

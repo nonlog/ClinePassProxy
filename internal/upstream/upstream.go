@@ -29,6 +29,7 @@ import (
 // Client pools HTTP clients by proxy URL so connections are reused across
 // requests instead of being re-handshaked per call.
 type Client struct {
+	mu      sync.RWMutex
 	baseURL string
 	pool    sync.Map // proxy URL -> *http.Client
 }
@@ -40,11 +41,23 @@ func New(baseURL string) *Client {
 
 // SetBaseURL repoints the client at another API root.
 func (c *Client) SetBaseURL(baseURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 }
 
 // BaseURL returns the configured API root.
-func (c *Client) BaseURL() string { return c.baseURL }
+func (c *Client) BaseURL() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.baseURL
+}
+
+// endpoint joins an API path onto the current root. The root is a directory
+// prefix such as https://api.cline.bot/api/v1, so the separator is required.
+func (c *Client) endpoint(path string) string {
+	return c.BaseURL() + "/" + strings.TrimPrefix(path, "/")
+}
 
 // Stream is an open upstream response.
 type Stream struct {
@@ -103,7 +116,7 @@ func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Rec
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 
-	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint("/chat/completions"), bytes.NewReader(req.Body))
 	if err != nil {
 		cancel()
 		return nil, err
@@ -133,7 +146,7 @@ func (c *Client) JSON(ctx context.Context, credential credentials.Record, path s
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, c.baseURL+strings.TrimPrefix(path, "/"), nil)
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, c.endpoint(path), nil)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -352,12 +365,13 @@ var ErrStreamLimit = errors.New("upstream response exceeds the configured limit"
 // ErrPartialFrame reports a stream that ended in the middle of an SSE frame.
 var ErrPartialFrame = errors.New("upstream stream ended with an incomplete SSE frame")
 
-// Next returns the next SSE event. It returns io.EOF at a clean end of stream.
+// Next returns the next SSE event. It returns io.EOF at a clean end of stream
+// and ErrPartialFrame when the stream stopped in the middle of an event.
 func (d *SSEDecoder) Next() (Event, error) {
 	var event Event
 	var data []string
 	for {
-		line, err := d.readLine()
+		line, terminated, err := d.readLine()
 		if line != "" {
 			switch {
 			case strings.HasPrefix(line, "data:"):
@@ -379,7 +393,14 @@ func (d *SSEDecoder) Next() (Event, error) {
 		if !errors.Is(err, io.EOF) {
 			return Event{}, err
 		}
-		// End of stream. Flush a final frame that was not blank-line terminated.
+		// A line that reached EOF without its newline is a truncated frame.
+		// Delivering it would let a cut-off response pass as a complete one.
+		// An empty final read is the ordinary end of a well-formed stream.
+		if line != "" && !terminated {
+			return Event{}, ErrPartialFrame
+		}
+		// End of stream after a terminated line: flush the last frame that the
+		// upstream did not close with a blank line.
 		if len(data) > 0 || event.Name != "" {
 			event.Data = []byte(strings.Join(data, "\n"))
 			return event, nil
@@ -395,16 +416,24 @@ type Event struct {
 	Data []byte
 }
 
-func (d *SSEDecoder) readLine() (string, error) {
+// readLine returns one line, whether it ended with a newline, and the read
+// error. A final line that ran into EOF carries terminated=false.
+func (d *SSEDecoder) readLine() (string, bool, error) {
 	line, err := d.reader.ReadString('\n')
 	d.read += int64(len(line))
 	if d.read > d.limit {
-		return "", ErrStreamLimit
+		return "", false, ErrStreamLimit
 	}
+	terminated := err == nil
 	line = strings.TrimSuffix(line, "\n")
 	line = strings.TrimSuffix(line, "\r")
 	if err != nil && line == "" {
-		return "", err
+		return "", terminated, err
 	}
-	return line, err
+	if errors.Is(err, io.EOF) {
+		// Keep reporting io.EOF so end-of-stream handling stays in one place;
+		// terminated carries the difference between a clean and a partial line.
+		return line, false, io.EOF
+	}
+	return line, terminated, err
 }

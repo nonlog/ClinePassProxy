@@ -3,7 +3,6 @@
 package serving
 
 import (
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -33,15 +32,6 @@ type Server struct {
 	selector *affinity.Selector
 
 	startedAt time.Time
-	mu        sync.RWMutex
-	override  *readinessOverride
-}
-
-// readinessOverride lets a caller pin the ready state; it stays nil in normal
-// operation so readiness tracks the credential pool.
-type readinessOverride struct {
-	ready  bool
-	reason string
 }
 
 // New builds a server around the given stores.
@@ -57,23 +47,16 @@ func New(settings *config.Store, creds *credentials.Store, history *admin.Histor
 	return server
 }
 
-// SetReady marks the service as ready for traffic.
-func (s *Server) SetReady(ready bool, reason string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.override = &readinessOverride{ready: ready, reason: reason}
-}
-
-// readiness reports whether the proxy can serve inference traffic.
+// readiness reports whether the proxy can serve inference traffic. It always
+// derives from the live credential pool, so enabling or disabling a credential
+// through the management API changes /ready immediately.
 func (s *Server) readiness() (bool, string) {
-	s.mu.RLock()
-	override := s.override
-	s.mu.RUnlock()
-	if override != nil {
-		return override.ready, override.reason
-	}
+	settings := s.Config.Get()
 	if len(s.Creds.Enabled()) == 0 {
 		return false, "no enabled Cline credential is configured"
+	}
+	if len(settings.GatewayKeys) == 0 && !settings.AllowUnauthenticated {
+		return false, "no gateway API key is configured, so the inference API is closed"
 	}
 	return true, ""
 }
@@ -152,8 +135,18 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 // inference wraps a data-plane handler with gateway authentication.
 func (s *Server) inference(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		keys := s.Config.Get().GatewayKeys
-		if len(keys) > 0 && !matchesAnyKey(bearerToken(r), keys) {
+		settings := s.Config.Get()
+		keys := settings.GatewayKeys
+		if len(keys) == 0 {
+			if !settings.AllowUnauthenticated {
+				writeError(w, http.StatusServiceUnavailable,
+					"the inference API is closed: add a gateway API key in the management UI, or set allow_unauthenticated")
+				return
+			}
+			next(w, r)
+			return
+		}
+		if !matchesAnyKey(bearerToken(r), keys) {
 			writeError(w, http.StatusUnauthorized, "invalid gateway API key")
 			return
 		}
@@ -196,6 +189,10 @@ type requestContext struct {
 	upstream  string
 	sessionID string
 	sessionBy string
+	// streamed records that SSE headers and at least the protocol prologue have
+	// already been written, so a later failure must not append a JSON error body
+	// to the open event stream.
+	streamed bool
 }
 
 type trail struct {
@@ -294,7 +291,11 @@ func (s *Server) failWithTrail(w http.ResponseWriter, request *requestContext, s
 	record.FailoverCount = len(record.Attempts)
 	final := request.tracker.Finish(status, errors.New(credentials.Sanitize(err.Error())))
 	s.History.Append(final)
-	writeError(w, status, final.Error)
+	// Once SSE frames are on the wire the status code is already sent; a JSON
+	// error body would land inside the event stream.
+	if !request.streamed {
+		writeError(w, status, final.Error)
+	}
 }
 
 // dispatch runs one inference request, including credential failover.
@@ -329,6 +330,14 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, request *reque
 		status, err, retryable := s.serve(w, r, request, credential, timeout)
 		if err == nil {
 			s.recordCredentialSuccess(credential.ID)
+			return
+		}
+		// A client that cancelled the turn (pi stopped the request) is not a
+		// credential failure: the same key would serve the retry just as well,
+		// and failing the credential over would poison a healthy key.
+		if r.Context().Err() != nil {
+			request.trail.add(fmt.Sprintf("%s -> client cancelled: %s", credential.Label, credentials.Sanitize(err.Error())))
+			s.finishRequest(request, statusClientClosed, err)
 			return
 		}
 		lastErr, lastStatus = err, status
@@ -431,35 +440,30 @@ func (s *Server) openUpstream(r *http.Request, request *requestContext, credenti
 
 	// The upstream deadline is independent of the client connection, but a
 	// client disconnect must still cancel the upstream request immediately.
-	ctx, cancel := context.WithCancel(context.Background())
-	stopped := make(chan struct{})
-	go func() {
-		select {
-		case <-r.Context().Done():
-			cancel()
-		case <-stopped:
-		}
-	}()
-	defer close(stopped)
-
-	return s.upstream.ChatCompletions(ctx, credential, upstream.ChatRequest{
+	// ChatCompletions derives its own timeout context from this one, so the
+	// cancellation survives for the whole life of the response body: a client
+	// that goes away (pi cancels a turn) stops the Cline request at once
+	// instead of letting it run to the upstream deadline.
+	return s.upstream.ChatCompletions(r.Context(), credential, upstream.ChatRequest{
 		Body:    encoded,
 		Stream:  stream,
 		Timeout: timeout,
 	})
 }
 
-// consumeUpstream streams the upstream SSE through a per-frame converter.
-func (s *Server) consumeUpstream(r *http.Request, request *requestContext, stream *upstream.Stream, emit func(raw []byte) ([][]byte, error), write func(frames [][]byte) error, done func() ([][]byte, error)) error {
+// consumeUpstream streams the upstream SSE through a per-frame converter. It
+// reports whether the upstream closed the stream with an explicit [DONE] frame.
+func (s *Server) consumeUpstream(r *http.Request, request *requestContext, stream *upstream.Stream, emit func(raw []byte) ([][]byte, error), write func(frames [][]byte) error, done func() ([][]byte, error)) (bool, error) {
 	decoder := upstream.NewSSEDecoder(stream.Body, s.limitBytes())
 	record := request.tracker.Record()
+	sawDone := false
 	for {
 		event, err := decoder.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return err
+			return sawDone, err
 		}
 		payload := strings.TrimSpace(string(event.Data))
 		if payload == "" {
@@ -469,13 +473,14 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 			request.tracker.Stage(admin.StageFirstUpstreamEvent)
 		}
 		if payload == "[DONE]" {
+			sawDone = true
 			break
 		}
 		chunk := unwrapCompletionEnvelope([]byte(payload))
 		s.observeChunk(request, chunk)
 		frames, err := emit(chunk)
 		if err != nil {
-			return err
+			return sawDone, err
 		}
 		if len(frames) == 0 {
 			continue
@@ -483,23 +488,58 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 		if record.Timings[admin.StageFirstProtocolEvent] == 0 {
 			request.tracker.Stage(admin.StageFirstProtocolEvent)
 		}
+		// TTFT must measure the frame that carries the first visible token, not
+		// the protocol prologue (message_start / response.created) that precedes
+		// the provider's first byte of content.
+		if record.Timings[admin.StageFirstTokenWrite] == 0 && chunkHasVisibleOutput(chunk) {
+			request.tracker.Stage(admin.StageFirstTokenWrite)
+		}
 		if err := write(frames); err != nil {
-			return err
+			return sawDone, err
 		}
 	}
 	if done != nil {
 		frames, err := done()
 		if err != nil {
-			return err
+			return sawDone, err
 		}
 		if len(frames) > 0 {
 			if err := write(frames); err != nil {
-				return err
+				return sawDone, err
 			}
 		}
 	}
 	request.tracker.Stage(admin.StageStreamComplete)
-	return nil
+	return sawDone, nil
+}
+
+// chunkHasVisibleOutput reports whether an upstream Chat Completions chunk
+// carries text, reasoning or a tool call for the client to render.
+func chunkHasVisibleOutput(raw []byte) bool {
+	root, err := models.DecodeObject(raw)
+	if err != nil {
+		return false
+	}
+	for _, rawChoice := range models.List(root["choices"]) {
+		choice := models.Object(rawChoice)
+		delta := models.Object(choice["delta"])
+		if delta == nil {
+			continue
+		}
+		if models.String(delta["content"]) != "" {
+			return true
+		}
+		if models.String(delta["reasoning_content"]) != "" || models.String(delta["reasoning"]) != "" {
+			return true
+		}
+		if len(models.List(delta["tool_calls"])) > 0 {
+			return true
+		}
+		if models.Object(delta["function_call"]) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // observeChunk records usage and provider metadata from an upstream chunk.

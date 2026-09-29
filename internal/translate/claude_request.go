@@ -51,7 +51,7 @@ func ClaudeMessagesToChatCompletions(body []byte, upstreamModel string, stream b
 	}
 
 	messages := make([]any, 0, len(models.List(root["messages"]))+1)
-	if system := claudeSystemText(root["system"]); system != "" {
+	if system := claudeSystemContent(root["system"]); len(system) > 0 {
 		messages = append(messages, map[string]any{"role": "system", "content": system})
 	}
 
@@ -232,6 +232,38 @@ func claudeSystemText(value any) string {
 		return strings.Join(parts, "\n")
 	}
 	return ""
+}
+
+// claudeSystemContent renders the top-level Anthropic system value the way
+// CPA v8.0.4 does: an ordered list of text blocks, with the Claude Code
+// billing/attribution block dropped.
+//
+// Joining the blocks into one string changes the bytes of the prompt prefix,
+// and the prompt cache is keyed on those bytes, so the block structure is part
+// of the request contract rather than a formatting detail.
+func claudeSystemContent(value any) []any {
+	switch content := value.(type) {
+	case string:
+		if content == "" || isClaudeAttributionText(content) {
+			return nil
+		}
+		return []any{map[string]any{"type": "text", "text": content}}
+	case []any:
+		out := make([]any, 0, len(content))
+		for _, raw := range content {
+			part := models.Object(raw)
+			if models.String(part["type"]) != "text" {
+				continue
+			}
+			text := models.String(part["text"])
+			if text == "" || isClaudeAttributionText(text) {
+				continue
+			}
+			out = append(out, map[string]any{"type": "text", "text": text})
+		}
+		return out
+	}
+	return nil
 }
 
 func isClaudeAttributionText(text string) bool {

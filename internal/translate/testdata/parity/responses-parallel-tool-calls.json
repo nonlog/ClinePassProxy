@@ -1,0 +1,39 @@
+{
+  "protocol": "openai-responses",
+  "note": "CPA v8.0.4 flushPendingToolCalls puts parallel calls from one turn into a single assistant message and every result directly after it. Emitting one assistant message per call leaves a tool result behind the wrong assistant message.",
+  "request": {
+    "model": "gpt-5.6",
+    "input": [
+      { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "check both" }] },
+      { "type": "function_call", "call_id": "call_a", "name": "get_weather", "arguments": "{\"city\":\"Oslo\"}" },
+      { "type": "function_call", "call_id": "call_b", "name": "get_time", "arguments": "{\"city\":\"Oslo\"}" },
+      { "type": "function_call_output", "call_id": "call_a", "output": "sunny" },
+      { "type": "function_call_output", "call_id": "call_b", "output": "12:00" }
+    ]
+  },
+  "expected": {
+    "model": "upstream-model",
+    "stream": true,
+    "messages": [
+      { "role": "user", "content": [{ "type": "text", "text": "check both" }] },
+      {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "call_a",
+            "type": "function",
+            "function": { "name": "get_weather", "arguments": "{\"city\":\"Oslo\"}" }
+          },
+          {
+            "id": "call_b",
+            "type": "function",
+            "function": { "name": "get_time", "arguments": "{\"city\":\"Oslo\"}" }
+          }
+        ]
+      },
+      { "role": "tool", "tool_call_id": "call_a", "content": "sunny" },
+      { "role": "tool", "tool_call_id": "call_b", "content": "12:00" }
+    ]
+  }
+}

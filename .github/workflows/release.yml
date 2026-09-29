@@ -86,10 +86,12 @@ jobs:
       - name: Build connector shared object
         env:
           CC: ${{ matrix.cc }}
+          TAG: ${{ github.ref_name }}
         run: |
           mkdir -p connector-dist
           (cd cpa-connector && CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.goarch }} go build \
-            -buildmode=c-shared -trimpath -ldflags "-s -w" \
+            -buildmode=c-shared -trimpath \
+            -ldflags "-s -w -X github.com/nonlog/ClinePassProxy/cpa-connector/internal/connector.Version=${TAG}" \
             -o ../connector-dist/clinepassproxy-connector-linux-${{ matrix.goarch }}.so \
             ./cmd/clinepassproxy-connector)
       - name: Checksums

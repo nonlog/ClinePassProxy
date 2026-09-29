@@ -322,7 +322,15 @@ func (c *ClaudeStreamConverter) Feed(raw []byte) ([][]byte, error) {
 }
 
 // Done emits the terminal frames when the upstream ended without a usage event.
+// It refuses to invent a successful ending: an upstream stream that never
+// reported a finish reason is a truncated response, not a completed turn.
 func (c *ClaudeStreamConverter) Done() ([][]byte, error) {
+	if c.terminal {
+		return nil, nil
+	}
+	if c.finish == "" {
+		return nil, ErrUpstreamTruncated
+	}
 	var out [][]byte
 	if !c.started {
 		if err := c.ensureStarted(map[string]any{}, &out); err != nil {
@@ -337,6 +345,19 @@ func (c *ClaudeStreamConverter) Done() ([][]byte, error) {
 
 // Usage returns the Claude-shaped usage block collected so far.
 func (c *ClaudeStreamConverter) Usage() map[string]any { return c.usage }
+
+// ErrorFrame renders the Anthropic error event that terminates a stream the
+// proxy could not complete.
+func (c *ClaudeStreamConverter) ErrorFrame(message string) []byte {
+	frame, err := SSEEvent("error", map[string]any{
+		"type":  "error",
+		"error": map[string]any{"type": "api_error", "message": message},
+	})
+	if err != nil {
+		return []byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"upstream stream truncated\"}}\n\n")
+	}
+	return frame
+}
 
 // FinishReason returns the upstream finish reason.
 func (c *ClaudeStreamConverter) FinishReason() string { return c.finish }

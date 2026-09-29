@@ -46,8 +46,13 @@ func TestClaudeMessagesSystemAndTurns(t *testing.T) {
 		t.Fatalf("expected system + user + assistant, got %d", len(messages))
 	}
 	system := models.Object(messages[0])
-	if models.String(system["role"]) != "system" || models.String(system["content"]) != "You are terse." {
-		t.Fatalf("billing attribution was not stripped from the system prompt: %v", system)
+	if models.String(system["role"]) != "system" {
+		t.Fatalf("system message missing: %v", system)
+	}
+	blocks := models.List(system["content"])
+	if len(blocks) != 1 || models.String(models.Object(blocks[0])["type"]) != "text" ||
+		models.String(models.Object(blocks[0])["text"]) != "You are terse." {
+		t.Fatalf("system content must stay a block list with the attribution block stripped: %v", system)
 	}
 	if text := models.String(models.Object(messages[1])["content"]); text != "hello" {
 		t.Fatalf("string user content changed: %v", messages[1])
