@@ -97,7 +97,7 @@ jobs:
       - name: Checksums
         run: |
           cd connector-dist
-          sha256sum * > checksums.txt
+          sha256sum clinepassproxy-connector-linux-${{ matrix.goarch }}.so clinepassproxy-connector-linux-${{ matrix.goarch }}.h > connector-linux-${{ matrix.goarch }}.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: connector-linux-${{ matrix.goarch }}
@@ -144,8 +144,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v5
+      - name: Download proxy artifacts
+        uses: actions/download-artifact@v5
         with:
+          pattern: clinepassproxy-linux-*
+          path: release
+          merge-multiple: true
+      - name: Download connector artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: connector-linux-*
           path: release
           merge-multiple: true
       - name: Collect checksums
