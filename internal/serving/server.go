@@ -540,7 +540,7 @@ func (s *Server) observeChunk(request *requestContext, raw []byte) {
 			request.tracker.LastStage("last_" + kind + "_event")
 		}
 	}
-	if provider := models.String(root["provider"]); provider != "" && record.Provider == "" {
+	if provider, final := completionProvider(root); provider != "" && (final || record.Provider == "") {
 		record.Provider = provider
 	}
 	usage := models.Object(root["usage"])

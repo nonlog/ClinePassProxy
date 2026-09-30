@@ -2,10 +2,43 @@ package serving
 
 import (
 	"bytes"
+	"strings"
 
 	"github.com/nonlog/ClinePassProxy/internal/admin"
 	"github.com/nonlog/ClinePassProxy/internal/models"
 )
+
+// completionProvider only accepts response evidence, never routing candidates.
+// A final provider can replace an earlier serving-provider fallback in a stream.
+func completionProvider(root map[string]any) (provider string, final bool) {
+	var serving string
+	for _, rawChoice := range models.List(root["choices"]) {
+		choice := models.Object(rawChoice)
+		for _, key := range []string{"delta", "message"} {
+			payload := models.Object(choice[key])
+			if provider := finalProvider(payload); provider != "" {
+				return provider, true
+			}
+			if serving == "" {
+				serving = strings.TrimSpace(models.String(payload["provider"]))
+			}
+		}
+	}
+	if provider := finalProvider(root); provider != "" {
+		return provider, true
+	}
+	if provider := strings.TrimSpace(models.String(root["provider"])); provider != "" {
+		return provider, false
+	}
+	return serving, false
+}
+
+func finalProvider(payload map[string]any) string {
+	metadata := models.Object(payload["provider_metadata"])
+	gateway := models.Object(metadata["gateway"])
+	routing := models.Object(gateway["routing"])
+	return strings.TrimSpace(models.String(routing["finalProvider"]))
+}
 
 // completionKinds distinguishes provider text, reasoning and tool data. No
 // content is retained: only the presence and timestamp of each kind is stored.
