@@ -737,6 +737,100 @@ func TestFailedRequestRecordsStatusAndDuration(t *testing.T) {
 	}
 }
 
+func TestNonStreamingEmptyContentFallsBackToStreamAggregation(t *testing.T) {
+	type upstreamCall struct {
+		stream    bool
+		maxTokens int64
+	}
+	var calls []upstreamCall
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		stream := models.Bool(body["stream"])
+		calls = append(calls, upstreamCall{stream: stream, maxTokens: models.Number(body["max_tokens"])})
+		if !stream {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"empty response content","success":false}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fallback\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"thinking\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fallback\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":32,\"completion_tokens\":16,\"completion_tokens_details\":{\"reasoning_tokens\":16}}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer cline.Close()
+
+	cases := []struct {
+		name string
+		path string
+		body string
+	}{
+		{
+			name: "chat-completions",
+			path: "/v1/chat/completions",
+			body: `{"model":"m","max_tokens":16,"stream":false,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "messages",
+			path: "/v1/messages",
+			body: `{"model":"m","max_tokens":16,"stream":false,"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name: "responses",
+			path: "/v1/responses",
+			body: `{"model":"m","max_output_tokens":16,"stream":false,"input":"hi"}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls = nil
+			_, handler := newTestServer(t, cline.URL)
+			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			request.Header.Set("Authorization", "Bearer gateway-key")
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+			}
+			if strings.Contains(recorder.Body.String(), "clinepassproxy_error") {
+				t.Fatalf("fallback returned proxy error: %s", recorder.Body.String())
+			}
+			if len(calls) != 2 {
+				t.Fatalf("expected native request plus streaming fallback, got %+v", calls)
+			}
+			if calls[0].stream || !calls[1].stream {
+				t.Fatalf("unexpected fallback modes: %+v", calls)
+			}
+			if calls[0].maxTokens != 16 || calls[1].maxTokens != 16 {
+				t.Fatalf("fallback changed the caller token budget: %+v", calls)
+			}
+
+			if tc.name == "chat-completions" {
+				var completion map[string]any
+				if err := json.Unmarshal(recorder.Body.Bytes(), &completion); err != nil {
+					t.Fatalf("invalid Chat Completions response: %v", err)
+				}
+				choice := models.Object(models.List(completion["choices"])[0])
+				message := models.Object(choice["message"])
+				if models.String(message["reasoning_content"]) != "thinking" {
+					t.Fatalf("reasoning output was not aggregated: %s", recorder.Body.String())
+				}
+				if models.String(choice["finish_reason"]) != "length" {
+					t.Fatalf("finish reason was not preserved: %s", recorder.Body.String())
+				}
+			}
+		})
+	}
+}
+
 // readEvents normalizes an SSE body so substring assertions survive framing.
 func readEvents(t *testing.T, body []byte) string {
 	t.Helper()

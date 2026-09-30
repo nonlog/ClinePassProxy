@@ -52,24 +52,12 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 	}
 	request.tracker.Stage(admin.StageTranslateDone)
 
-	stream, err := s.openUpstream(r, request, credential, payload, models.Bool(request.body["stream"]), timeout)
-	if err != nil {
-		return http.StatusBadGateway, err, true
-	}
-	defer stream.Close()
-	request.tracker.Stage(admin.StageUpstreamHeaders)
-
-	if stream.StatusCode < 200 || stream.StatusCode >= 300 {
-		status, err := upstreamError(stream, "Cline")
-		return status, err, retryableUpstreamStatus(status)
-	}
-
-	if !models.Bool(request.body["stream"]) {
-		raw, err := readAll(stream, s.limitBytes())
+	streaming := models.Bool(request.body["stream"])
+	if !streaming {
+		raw, status, err, retryable := s.readNonstreamCompletion(r, request, credential, payload, timeout)
 		if err != nil {
-			return http.StatusBadGateway, err, true
+			return status, err, retryable
 		}
-		raw = unwrapCompletionEnvelope(raw)
 		s.observeChunk(request, raw)
 		converted, err := translate.OpenAICompletionToClaude(raw, request.model, request.raw)
 		if err != nil {
@@ -80,6 +68,18 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(converted)
 		return http.StatusOK, nil, false
+	}
+
+	stream, err := s.openUpstream(r, request, credential, payload, true, timeout)
+	if err != nil {
+		return http.StatusBadGateway, err, true
+	}
+	defer stream.Close()
+	request.tracker.Stage(admin.StageUpstreamHeaders)
+
+	if stream.StatusCode < 200 || stream.StatusCode >= 300 {
+		status, err := upstreamError(stream, "Cline")
+		return status, err, retryableUpstreamStatus(status)
 	}
 
 	converter := translate.NewClaudeStreamConverter(request.model, request.raw)
@@ -120,25 +120,13 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 	}
 	request.tracker.Stage(admin.StageTranslateDone)
 
-	stream, err := s.openUpstream(r, request, credential, payload, models.Bool(request.body["stream"]), timeout)
-	if err != nil {
-		return http.StatusBadGateway, err, true
-	}
-	defer stream.Close()
-	request.tracker.Stage(admin.StageUpstreamHeaders)
-
-	if stream.StatusCode < 200 || stream.StatusCode >= 300 {
-		status, err := upstreamError(stream, "Cline")
-		return status, err, retryableUpstreamStatus(status)
-	}
-
 	translated, _ := jsonBytes(payload)
-	if !models.Bool(request.body["stream"]) {
-		raw, err := readAll(stream, s.limitBytes())
+	streaming := models.Bool(request.body["stream"])
+	if !streaming {
+		raw, status, err, retryable := s.readNonstreamCompletion(r, request, credential, payload, timeout)
 		if err != nil {
-			return http.StatusBadGateway, err, true
+			return status, err, retryable
 		}
-		raw = unwrapCompletionEnvelope(raw)
 		s.observeChunk(request, raw)
 		converted, err := translate.OpenAICompletionToResponses(raw, request.model, request.raw, translated)
 		if err != nil {
@@ -149,6 +137,18 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(converted)
 		return http.StatusOK, nil, false
+	}
+
+	stream, err := s.openUpstream(r, request, credential, payload, true, timeout)
+	if err != nil {
+		return http.StatusBadGateway, err, true
+	}
+	defer stream.Close()
+	request.tracker.Stage(admin.StageUpstreamHeaders)
+
+	if stream.StatusCode < 200 || stream.StatusCode >= 300 {
+		status, err := upstreamError(stream, "Cline")
+		return status, err, retryableUpstreamStatus(status)
 	}
 
 	converter := translate.NewResponsesStreamConverter(request.model, request.raw, translated)
@@ -196,7 +196,20 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 	stream := models.Bool(request.body["stream"])
 	request.tracker.Stage(admin.StageTranslateDone)
 
-	upstreamStream, err := s.openUpstream(r, request, credential, payload, stream, timeout)
+	if !stream {
+		raw, status, err, retryable := s.readNonstreamCompletion(r, request, credential, payload, timeout)
+		if err != nil {
+			return status, err, retryable
+		}
+		s.observeChunk(request, raw)
+		s.finishRequest(request, http.StatusOK, nil)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(normalizeCompletionModel(raw, request.model))
+		return http.StatusOK, nil, false
+	}
+
+	upstreamStream, err := s.openUpstream(r, request, credential, payload, true, timeout)
 	if err != nil {
 		return http.StatusBadGateway, err, true
 	}
@@ -206,20 +219,6 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 	if upstreamStream.StatusCode < 200 || upstreamStream.StatusCode >= 300 {
 		status, err := upstreamError(upstreamStream, "Cline")
 		return status, err, retryableUpstreamStatus(status)
-	}
-
-	if !stream {
-		raw, err := readAll(upstreamStream, s.limitBytes())
-		if err != nil {
-			return http.StatusBadGateway, err, true
-		}
-		raw = unwrapCompletionEnvelope(raw)
-		s.observeChunk(request, raw)
-		s.finishRequest(request, http.StatusOK, nil)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(normalizeCompletionModel(raw, request.model))
-		return http.StatusOK, nil, false
 	}
 
 	writer := newSSEWriter(w)
