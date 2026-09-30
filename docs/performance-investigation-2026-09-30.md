@@ -66,6 +66,9 @@ message timestamp 是请求创建附近的时间；二者都不是首 token 显�
 原请求没有 first_reasoning_event、first_text_event、实际 flush 时间等新字段。
 没有 text，所以 first_visible_text_token / pi first visible text 不适用；
 pi 首个 thinking/tool 显示时刻也未记录。
+parse_done 至 credential_selected 的 134 ms 包含 affinity/session 处理等工作，
+不是已测得的纯 credential selection；translate_done 后的 45 ms 也不能继续拆分成
+精确 marshal/copy/HTTP preparation 时间。原请求这些子阶段缺少独立探针。
 
 4,553 ms 是 NewAPI 入口到 Proxy handler 的整个区间，可能包含输入读取、
 解析、第一次渠道选择、后续 relay 准备和发送，**不是纯网络耗时**。
