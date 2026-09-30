@@ -161,6 +161,9 @@ Use the actual existing network name. The image can also be pinned to a verified
 `0.0.0.0:8788` internally; NewAPI on the same network can use
 `http://clinepassproxy:8788`. A host-networked management connector uses the
 private host-published address instead. Inference never passes through CPA.
+The production NewAPI Cline channel (#53) uses exactly
+`http://clinepassproxy:8788`; do not point it at the host bridge address when
+the caller is the `new-api` container.
 
 The v0.1.10 image runs as UID 100 / GID 101. For a fresh empty state directory:
 
