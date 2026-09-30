@@ -70,6 +70,10 @@ POST /v1/messages          -> Cline Chat Completions -> native Claude Messages S
 POST /v1/responses         -> Cline Chat Completions -> native Responses SSE
 POST /v1/chat/completions  -> minimal normalization  -> Cline SSE / non-stream
 GET  /health, GET /ready
+
+management plane (never inference):
+GET  /api/dashboard, /api/official, /api/status, /api/config, /api/models,
+     /api/usage, /api/requests, /api/credentials
 ```
 
 Three independent credentials:
@@ -77,6 +81,23 @@ Three independent credentials:
 ```
 management auth != gateway API key != Cline credential
 ```
+
+## Console delivery
+
+The console is authored as separate files under `internal/serving/web/`
+(`theme.css`, `app.css`, `js/*.js`) and served as one document: `ui.go` inlines
+every entry of `uiAssets` into `index.html`. The CPA connector only fetches `/`
+once and serves that response from the CPA origin, so:
+
+- a new asset must be added to `uiAssets`, in dependency order;
+- no asset may use ES module `import`/`export`, because nothing is served as a
+  separate file to the browser;
+- management calls must stay relative paths starting with `/api/`, which is what
+  the connector's shim rewrites and re-authenticates.
+
+Official Cline numbers come from `internal/cline` (the account API). They are
+never estimated from this proxy's own request history, and a field the upstream
+does not return is shown as `—`.
 
 ## Security
 
