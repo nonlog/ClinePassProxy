@@ -138,46 +138,70 @@ The Requests view separates the two.
 
 ## Deploy
 
-Two hosting models use the same binary and the same state layout. Pick the one
-that matches how the caller reaches the proxy.
+### Docker Compose (current VPS deployment)
 
-### systemd (current VPS deployment)
+The proxy uses the same deployment structure as CommandCode Proxy: an
+Actions-built GHCR image, `restart: unless-stopped`, a persistent bind mount and
+an existing NewAPI Docker network. No build runs on the VPS or desktop.
 
-The Cline caller (CPA) runs with host networking, so the proxy runs as a host
-process on loopback and CPA reaches it at `http://127.0.0.1:8788`.
+For a fresh deployment, copy `docker-compose.example.yml` to the deployment
+directory as `docker-compose.yml`. Set these non-secret values in its private
+`.env` file:
 
-```bash
-scripts/deploy-vps.sh v0.1.3
+```dotenv
+CLINEPASSPROXY_IMAGE=ghcr.io/nonlog/clinepassproxy:v0.1.10
+CLINEPASSPROXY_NETWORK=backend
+CLINEPASSPROXY_DATA_DIR=./data
+CLINEPASSPROXY_BIND_IP=127.0.0.1
+CLINEPASSPROXY_PORT=8788
 ```
 
-The script downloads the published binary, verifies its checksum, swaps
-`/opt/clinepassproxy/bin/clinepassproxy`, restarts the unit and checks `/health`
-and `/ready`. The unit sets `CLINEPASSPROXY_DATA_DIR=/var/lib/clinepassproxy` and
-`CLINEPASSPROXY_LISTEN=127.0.0.1:8788`, and keeps `ProtectSystem=full` with
-`ReadWritePaths` limited to the state directory.
+Use the actual existing network name. The image can also be pinned to a verified
+`ghcr.io/nonlog/clinepassproxy@sha256:...` digest. The container listens on
+`0.0.0.0:8788` internally; NewAPI on the same network can use
+`http://clinepassproxy:8788`. A host-networked management connector uses the
+private host-published address instead. Inference never passes through CPA.
 
-### Docker
-
-Use this when the caller is another container on a shared Docker network; the
-published image listens on `0.0.0.0:8788` inside its own namespace.
+The v0.1.10 image runs as UID 100 / GID 101. For a fresh empty state directory:
 
 ```bash
-docker run -d --name clinepassproxy \
-  -p 127.0.0.1:8788:8788 \
-  -v clinepassproxy-data:/var/lib/clinepassproxy \
-  ghcr.io/nonlog/clinepassproxy:latest
+install -d -m 0700 -o 100 -g 101 ./data
+docker compose config --quiet
+docker compose pull
+docker compose up -d --no-build --wait
 ```
 
-`docker-compose.example.yml` is the same deployment in compose form.
+For an existing deployment, mount its existing state directory, not an empty
+`./data`. Back up the directory first, stop the old instance only when idle,
+and grant the image's user ownership while retaining `0700` directories and
+`0600` state files. Never run two instances writing the same state directory.
+The production migration preserves the previous caller address and gateway/
+management/Cline credentials; the legacy systemd unit stays installed but
+disabled for rollback. CommandCode Proxy and ClinePassBridge are unchanged.
+
+Before an update or restart, check active requests in the management console
+and wait for idle. Then change the pinned image reference, pull, and run
+`docker compose up -d --no-build --wait`. The Compose stop grace period is 40
+seconds, longer than the application's shutdown deadline; it does not guarantee
+that an arbitrarily long generation will survive a restart. Keep the previous
+image digest and state backup for rollback.
 
 Either way, open the UI, add at least one Cline credential and set a gateway API
 key before pointing a caller at it. Inference stays closed until a gateway key
 exists.
 
-A container on the default bridge cannot reach a host process on `127.0.0.1`.
-Bind the proxy to the bridge address (`172.17.0.1:8788`) or run it on the
-caller's Docker network; the loopback default is deliberate, not a limitation to
-work around with `0.0.0.0`.
+Only publish on loopback or a private Docker bridge address, not `0.0.0.0`.
+If another service already uses the default host port, choose an unused port
+or retain the existing private binding. Shared-network callers use the container
+port, independently of the published host port. See
+[Docker's external-network documentation](https://docs.docker.com/compose/how-tos/networking/#use-an-existing-external-network).
+
+### Legacy systemd deployment
+
+`scripts/deploy-vps.sh` remains available for systemd-only installations. It
+downloads and verifies Actions-built binaries; it refuses to run if a
+`clinepassproxy` container already exists, so it cannot accidentally restart the
+retired host service alongside the container. Production uses Compose now.
 
 Production artifacts come from GitHub Actions only:
 

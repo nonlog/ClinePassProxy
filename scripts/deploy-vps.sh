@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install a published ClinePassProxy release on the VPS.
+# Legacy systemd installer. Current production uses Docker Compose.
+# Install a published ClinePassProxy binary on a systemd-only VPS.
 #
 # Release artifacts are built by GitHub Actions only. This script downloads the
 # published binary, verifies its checksum, swaps it in and restarts the systemd
@@ -10,6 +11,11 @@
 #   scripts/deploy-vps.sh v0.1.3
 #   scripts/deploy-vps.sh            # newest published release
 set -euo pipefail
+
+if command -v docker >/dev/null 2>&1 && docker inspect clinepassproxy >/dev/null 2>&1; then
+  echo "clinepassproxy is managed by Docker; use docker compose pull and docker compose up -d --no-build --wait" >&2
+  exit 1
+fi
 
 REPO="${CLINEPASSPROXY_REPO:-nonlog/ClinePassProxy}"
 INSTALL_DIR="${CLINEPASSPROXY_INSTALL_DIR:-/opt/clinepassproxy}"

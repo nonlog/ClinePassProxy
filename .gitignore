@@ -4,6 +4,7 @@
 /data/
 /bin/
 /dist/
+/.env
 *.exe
 
 # Agent-local prompt material is not part of the product

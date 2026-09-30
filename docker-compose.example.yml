@@ -1,22 +1,31 @@
-# Example deployment. Replace the management token placeholder before use; the
-# real Cline credentials are added through the management UI, never here.
+# Docker deployment using GitHub Actions release images, never a local build.
+# Set CLINEPASSPROXY_NETWORK to the existing NewAPI network in a private .env.
+# Real Cline credentials and gateway keys live in the mounted state directory.
 services:
   clinepassproxy:
-    image: ghcr.io/nonlog/clinepassproxy:latest
+    image: ${CLINEPASSPROXY_IMAGE:-ghcr.io/nonlog/clinepassproxy:v0.1.10}
     container_name: clinepassproxy
     restart: unless-stopped
+    stop_grace_period: 40s
     ports:
-      - "127.0.0.1:8788:8788"
+      - "${CLINEPASSPROXY_BIND_IP:-127.0.0.1}:${CLINEPASSPROXY_PORT:-8788}:8788"
     volumes:
-      - clinepassproxy-data:/var/lib/clinepassproxy
+      - ${CLINEPASSPROXY_DATA_DIR:-./data}:/var/lib/clinepassproxy
     environment:
       CLINEPASSPROXY_DATA_DIR: /var/lib/clinepassproxy
       CLINEPASSPROXY_LISTEN: 0.0.0.0:8788
+    expose:
+      - "8788"
+    networks:
+      - backend
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8788/health"]
       interval: 30s
       timeout: 5s
+      start_period: 5s
       retries: 3
 
-volumes:
-  clinepassproxy-data:
+networks:
+  backend:
+    name: ${CLINEPASSPROXY_NETWORK:-backend}
+    external: true

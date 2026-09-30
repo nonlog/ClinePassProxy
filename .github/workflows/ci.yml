@@ -26,6 +26,8 @@ jobs:
             echo "$files"
             exit 1
           fi
+      - name: Validate Docker deployment
+        run: docker compose -f docker-compose.example.yml config --quiet
       - name: Vet
         run: go vet ./...
       - name: Test with race detector
