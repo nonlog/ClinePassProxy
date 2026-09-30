@@ -38,6 +38,23 @@ jobs:
           go vet ./internal/...
           go test ./...
 
+  # The console ships as one inlined document; these checks keep the source
+  # files syntactically valid and the quota/formatting maths honest.
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20.x"
+      - name: Syntax check
+        run: |
+          for file in internal/serving/web/js/*.js; do
+            node --check "$file"
+          done
+      - name: Unit tests
+        run: node --test internal/serving/web/js/*.test.js
+
   build-plugin:
     runs-on: ubuntu-latest
     steps:

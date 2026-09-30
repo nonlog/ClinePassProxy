@@ -9,29 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/nonlog/ClinePassProxy/internal/credentials"
 )
-
-func TestJSONJoinsBaseURLPath(t *testing.T) {
-	var gotPath string
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		_, _ = w.Write([]byte(`{"success":true,"data":{}}`))
-	}))
-	defer server.Close()
-
-	for _, base := range []string{server.URL + "/api/v1", server.URL + "/api/v1/"} {
-		client := New(base)
-		if _, _, err := client.JSON(context.Background(), credentials.Record{APIKey: "k"}, "/users/me/plan/usage-limits", time.Second); err != nil {
-			t.Fatalf("base %q: %v", base, err)
-		}
-		if gotPath != "/api/v1/users/me/plan/usage-limits" {
-			t.Fatalf("base %q produced path %q", base, gotPath)
-		}
-	}
-}
 
 func TestClientBaseURLIsSafeForConcurrentUse(t *testing.T) {
 	// dispatch() repoints the shared client on every request while other

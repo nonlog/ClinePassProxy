@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nonlog/ClinePassProxy/internal/admin"
+	"github.com/nonlog/ClinePassProxy/internal/cline"
 	"github.com/nonlog/ClinePassProxy/internal/config"
 	"github.com/nonlog/ClinePassProxy/internal/credentials"
 	"github.com/nonlog/ClinePassProxy/internal/models"
@@ -173,24 +174,47 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	settings := s.Config.Get()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":          version.Name,
-		"version":       version.Version,
-		"commit":        version.ResolvedCommit(),
-		"build_time":    version.BuildTime,
-		"uptime_sec":    int(time.Since(s.startedAt).Seconds()),
-		"ready":         ready,
-		"ready_error":   readyErr,
-		"base_url":      settings.BaseURL,
-		"affinity":      settings.Affinity,
-		"credentials":   s.Creds.Views(),
-		"enabled_count": len(enabled),
-		"health":        health,
-		"usage":         s.History.Usage(),
-		"data_dir":      settings.DataDir,
+		"name":            version.Name,
+		"version":         version.Version,
+		"commit":          version.ResolvedCommit(),
+		"build_time":      version.BuildTime,
+		"uptime_sec":      int(time.Since(s.startedAt).Seconds()),
+		"active_requests": s.active.Load(),
+		"ready":           ready,
+		"ready_error":     readyErr,
+		"base_url":        settings.BaseURL,
+		"affinity":        settings.Affinity,
+		"credentials":     s.credentialViews(),
+		"enabled_count":   len(enabled),
+		"health":          health,
+		"usage":           s.History.Usage(),
+		"data_dir":        settings.DataDir,
 	})
 }
 
 // ---------------------------------------------------------------- credentials
+
+// credentialView is a credential's masked management projection plus the
+// official Cline account snapshot the proxy last read for it.
+type credentialView struct {
+	credentials.View
+	Official *cline.Snapshot `json:"official,omitempty"`
+}
+
+// credentialViews attaches the cached official snapshot to every credential.
+func (s *Server) credentialViews() []credentialView {
+	views := s.Creds.Views()
+	out := make([]credentialView, 0, len(views))
+	for _, view := range views {
+		out = append(out, credentialView{View: view, Official: s.officialSnapshot(view.ID)})
+	}
+	return out
+}
+
+// credentialViewOf builds one augmented view.
+func (s *Server) credentialViewOf(view credentials.View) credentialView {
+	return credentialView{View: view, Official: s.officialSnapshot(view.ID)}
+}
 
 type credentialPayload struct {
 	ID      string `json:"id"`
@@ -203,10 +227,7 @@ type credentialPayload struct {
 }
 
 func (s *Server) handleListCredentials(w http.ResponseWriter, _ *http.Request) {
-	views := s.Creds.Views()
-	if views == nil {
-		views = []credentials.View{}
-	}
+	views := s.credentialViews()
 	writeJSON(w, http.StatusOK, map[string]any{"credentials": views})
 }
 
@@ -230,7 +251,7 @@ func (s *Server) handleCreateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, record.View())
+	writeJSON(w, http.StatusCreated, s.credentialViewOf(record.View()))
 }
 
 func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +260,7 @@ func (s *Server) handleGetCredential(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "credential not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, record.View())
+	writeJSON(w, http.StatusOK, s.credentialViewOf(record.View()))
 }
 
 func (s *Server) handleUpdateCredential(w http.ResponseWriter, r *http.Request) {
@@ -271,7 +292,7 @@ func (s *Server) handleUpdateCredential(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, record.View())
+	writeJSON(w, http.StatusOK, s.credentialViewOf(record.View()))
 }
 
 func (s *Server) handleDeleteCredential(w http.ResponseWriter, r *http.Request) {
@@ -322,28 +343,22 @@ func (s *Server) handleTestCredential(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleRefreshCredential refreshes the Cline quota snapshot for a credential.
+// handleRefreshCredential re-reads the credential's Cline account: plan,
+// rolling quota windows, the official 31-day totals and the balance.
 func (s *Server) handleRefreshCredential(w http.ResponseWriter, r *http.Request) {
 	record, ok := s.Creds.Get(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "credential not found")
 		return
 	}
-	settings := s.Config.Get()
-	s.upstream.SetBaseURL(settings.BaseURL)
-	usage, err := s.upstream.PlanUsage(r.Context(), record)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, credentials.Sanitize(err.Error()))
+	if !record.Enabled {
+		writeError(w, http.StatusConflict, "credential is disabled; enable it before refreshing its usage")
 		return
 	}
-	updated, err := s.Creds.Update(record.ID, func(target *credentials.Record) {
-		target.Usage = &usage
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, updated.View())
+	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
+	defer cancel()
+	s.refreshOfficial(ctx, record.ID)
+	writeJSON(w, http.StatusOK, s.credentialViewOf(record.View()))
 }
 
 // ---------------------------------------------------------------- models
@@ -438,25 +453,81 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- usage
 
-func (s *Server) handleUsage(w http.ResponseWriter, _ *http.Request) {
+// usageRanges are the windows the Usage tab can ask for. They describe the
+// proxy's own observations; the official Cline numbers live under /api/official.
+var usageRanges = map[string]time.Duration{
+	"1h":  time.Hour,
+	"24h": 24 * time.Hour,
+	"7d":  7 * 24 * time.Hour,
+	"31d": 31 * 24 * time.Hour,
+	"all": 0,
+}
+
+func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimSpace(r.URL.Query().Get("range"))
+	if key == "" {
+		key = "all"
+	}
+	duration, ok := usageRanges[key]
+	if !ok {
+		writeError(w, http.StatusBadRequest, "range must be one of 1h, 24h, 7d, 31d, all")
+		return
+	}
+	var since time.Time
+	if duration > 0 {
+		since = time.Now().UTC().Add(-duration)
+	}
+	windows := make(map[string]admin.UsageSummary, len(usageRanges))
+	for name, span := range usageRanges {
+		var from time.Time
+		if span > 0 {
+			from = time.Now().UTC().Add(-span)
+		}
+		windows[name] = s.History.UsageSince(from)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"summary":     s.History.Usage(),
-		"credentials": s.Creds.Views(),
+		"range":       key,
+		"summary":     s.History.UsageSince(since),
+		"windows":     windows,
+		"credentials": s.credentialViews(),
+		"official": map[string]any{
+			"snapshots":        s.officialSnapshots(),
+			"refreshed_at":     s.officialRefreshedAt(),
+			"interval_seconds": int(officialInterval.Seconds()),
+		},
+		"retention": s.Config.Get().LogRetention,
 	})
 }
 
 func (s *Server) handleListRequests(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
 	limit := 100
-	if raw := r.URL.Query().Get("limit"); raw != "" {
+	if raw := query.Get("limit"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 1000 {
 			limit = parsed
 		}
 	}
-	records := s.History.List(limit, strings.TrimSpace(r.URL.Query().Get("model")))
+	filter := admin.Filter{
+		Limit:      limit,
+		Model:      strings.TrimSpace(query.Get("model")),
+		Credential: strings.TrimSpace(query.Get("credential")),
+		Provider:   strings.TrimSpace(query.Get("provider")),
+		Endpoint:   strings.TrimSpace(query.Get("endpoint")),
+		Status:     strings.TrimSpace(query.Get("status")),
+	}
+	if raw := strings.TrimSpace(query.Get("range")); raw != "" {
+		if duration, ok := usageRanges[raw]; ok && duration > 0 {
+			filter.Since = time.Now().UTC().Add(-duration)
+		}
+	}
+	records := s.History.Query(filter)
 	if records == nil {
 		records = []admin.Record{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"requests": records})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"requests": records,
+		"facets":   s.History.Facets(),
+	})
 }
 
 func (s *Server) handleGetRequest(w http.ResponseWriter, r *http.Request) {

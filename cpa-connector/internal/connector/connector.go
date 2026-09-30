@@ -180,6 +180,8 @@ func (s *Service) Routes() []Route {
 		desc   string
 	}{
 		{"GET", "/v0/management/clinepassproxy/status", "ClinePassProxy health and summary"},
+		{"GET", "/v0/management/clinepassproxy/dashboard", "ClinePassProxy service, traffic and credential summary"},
+		{"GET", "/v0/management/clinepassproxy/official", "Official Cline account quota and 31-day usage"},
 		{"GET", "/v0/management/clinepassproxy/version", "ClinePassProxy build identity"},
 		{"GET", "/v0/management/clinepassproxy/config", "ClinePassProxy settings"},
 		{"PUT", "/v0/management/clinepassproxy/config", "Update ClinePassProxy settings"},
@@ -290,6 +292,10 @@ func upstreamPath(path string) string {
 		return "/api/version"
 	case rest == "/status":
 		return "/api/status"
+	case rest == "/dashboard":
+		return "/api/dashboard"
+	case rest == "/official":
+		return "/api/official"
 	case rest == "/config":
 		return "/api/config"
 	case rest == "/credentials" || strings.HasPrefix(rest, "/credentials/"):

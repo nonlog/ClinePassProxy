@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nonlog/ClinePassProxy/internal/admin"
@@ -32,6 +33,9 @@ type Server struct {
 	selector *affinity.Selector
 
 	startedAt time.Time
+	official  *officialCache
+	// active counts the inference requests being served right now.
+	active atomic.Int64
 }
 
 // New builds a server around the given stores.
@@ -43,6 +47,7 @@ func New(settings *config.Store, creds *credentials.Store, history *admin.Histor
 		upstream:  upstream.New(settings.Get().BaseURL),
 		selector:  affinity.NewSelector(),
 		startedAt: time.Now().UTC(),
+		official:  newOfficialCache(),
 	}
 	return server
 }
@@ -75,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 
 	// Management API.
 	mux.HandleFunc("GET /api/version", s.handleVersion)
+	mux.Handle("GET /api/dashboard", s.management(http.HandlerFunc(s.handleDashboard)))
+	mux.Handle("GET /api/official", s.management(http.HandlerFunc(s.handleOfficial)))
 	mux.Handle("GET /api/status", s.management(http.HandlerFunc(s.handleStatus)))
 	mux.Handle("GET /api/config", s.management(http.HandlerFunc(s.handleGetConfig)))
 	mux.Handle("PUT /api/config", s.management(http.HandlerFunc(s.handlePutConfig)))
@@ -300,6 +307,9 @@ func (s *Server) failWithTrail(w http.ResponseWriter, request *requestContext, s
 
 // dispatch runs one inference request, including credential failover.
 func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, request *requestContext) {
+	s.active.Add(1)
+	defer s.active.Add(-1)
+
 	settings := s.Config.Get()
 	s.upstream.SetBaseURL(settings.BaseURL)
 

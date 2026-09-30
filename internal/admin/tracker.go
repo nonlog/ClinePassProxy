@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -243,18 +244,101 @@ func (h *History) Append(record Record) {
 
 // List returns the newest records first, optionally filtered by model.
 func (h *History) List(limit int, model string) []Record {
+	return h.Query(Filter{Limit: limit, Model: model})
+}
+
+// Filter narrows a history query. An empty field matches everything.
+type Filter struct {
+	Model      string
+	Credential string
+	Provider   string
+	Endpoint   string
+	// Status accepts "ok", "error" or an exact HTTP status code.
+	Status string
+	Since  time.Time
+	Limit  int
+}
+
+func (f Filter) matches(record Record) bool {
+	if f.Model != "" && record.Model != f.Model {
+		return false
+	}
+	if f.Credential != "" && record.CredentialID != f.Credential && record.CredentialName != f.Credential {
+		return false
+	}
+	if f.Provider != "" && record.Provider != f.Provider {
+		return false
+	}
+	if f.Endpoint != "" && record.Endpoint != f.Endpoint {
+		return false
+	}
+	if !f.Since.IsZero() && record.StartedAt.Before(f.Since) {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(f.Status)) {
+	case "":
+	case "ok", "success", "2xx":
+		if record.Status < 200 || record.Status >= 300 {
+			return false
+		}
+	case "error", "failed", "failure":
+		if record.Status >= 200 && record.Status < 300 {
+			return false
+		}
+	default:
+		if strconv.Itoa(record.Status) != strings.TrimSpace(f.Status) {
+			return false
+		}
+	}
+	return true
+}
+
+// Query returns the matching records, newest first.
+func (h *History) Query(filter Filter) []Record {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	out := make([]Record, 0, len(h.records))
 	for i := len(h.records) - 1; i >= 0; i-- {
 		record := h.records[i]
-		if model != "" && record.Model != model {
+		if !filter.matches(record) {
 			continue
 		}
 		out = append(out, record)
-		if limit > 0 && len(out) >= limit {
+		if filter.Limit > 0 && len(out) >= filter.Limit {
 			break
 		}
+	}
+	return out
+}
+
+// Facets lists the distinct filter values seen in the retained records so the
+// request viewer can offer real choices instead of free text.
+func (h *History) Facets() map[string][]string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	sets := map[string]map[string]bool{"models": {}, "credentials": {}, "providers": {}, "endpoints": {}}
+	for _, record := range h.records {
+		if record.Model != "" {
+			sets["models"][record.Model] = true
+		}
+		if record.CredentialName != "" {
+			sets["credentials"][record.CredentialName] = true
+		}
+		if record.Provider != "" {
+			sets["providers"][record.Provider] = true
+		}
+		if record.Endpoint != "" {
+			sets["endpoints"][record.Endpoint] = true
+		}
+	}
+	out := make(map[string][]string, len(sets))
+	for name, set := range sets {
+		values := make([]string, 0, len(set))
+		for value := range set {
+			values = append(values, value)
+		}
+		sort.Strings(values)
+		out[name] = values
 	}
 	return out
 }
@@ -289,11 +373,20 @@ type UsageSummary struct {
 
 // Usage aggregates every retained record.
 func (h *History) Usage() UsageSummary {
+	return h.UsageSince(time.Time{})
+}
+
+// UsageSince aggregates the records started at or after `since`. A zero time
+// aggregates everything that is still retained.
+func (h *History) UsageSince(since time.Time) UsageSummary {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	summary := UsageSummary{}
 	var ttftCount, decodeCount, e2eCount, durationCount int
 	for _, record := range h.records {
+		if !since.IsZero() && record.StartedAt.Before(since) {
+			continue
+		}
 		summary.Requests++
 		if record.Status >= 200 && record.Status < 300 {
 			summary.Successes++

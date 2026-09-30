@@ -122,3 +122,32 @@ func TestConnectorRegistersSingleMenuEntry(t *testing.T) {
 		t.Fatalf("expected exactly one ClinePassProxy menu entry, got %d", menuCount)
 	}
 }
+
+// Every path the console calls must be reachable through the connector,
+// otherwise the panel works standalone and breaks inside CPAMP.
+func TestConnectorForwardsEveryConsolePath(t *testing.T) {
+	cases := map[string]string{
+		"/v0/management/clinepassproxy/version":                 "/api/version",
+		"/v0/management/clinepassproxy/status":                  "/api/status",
+		"/v0/management/clinepassproxy/dashboard":               "/api/dashboard",
+		"/v0/management/clinepassproxy/official":                "/api/official",
+		"/v0/management/clinepassproxy/config":                  "/api/config",
+		"/v0/management/clinepassproxy/credentials":             "/api/credentials",
+		"/v0/management/clinepassproxy/credentials/www":         "/api/credentials/www",
+		"/v0/management/clinepassproxy/credentials/www/test":    "/api/credentials/www/test",
+		"/v0/management/clinepassproxy/credentials/www/refresh": "/api/credentials/www/refresh",
+		"/v0/management/clinepassproxy/models":                  "/api/models",
+		"/v0/management/clinepassproxy/models/test":             "/api/models/test",
+		"/v0/management/clinepassproxy/usage":                   "/api/usage",
+		"/v0/management/clinepassproxy/requests":                "/api/requests",
+		"/v0/management/clinepassproxy/requests/req-1":          "/api/requests/req-1",
+	}
+	for path, want := range cases {
+		if got := upstreamPath(path); got != want {
+			t.Errorf("upstreamPath(%q) = %q, want %q", path, got, want)
+		}
+	}
+	if got := upstreamPath("/v0/management/clinepassproxy/nope"); got != "" {
+		t.Errorf("unknown path mapped to %q", got)
+	}
+}

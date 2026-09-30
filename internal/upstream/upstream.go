@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -51,6 +50,13 @@ func (c *Client) BaseURL() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.baseURL
+}
+
+// HTTPClient returns the pooled HTTP client for a credential's proxy URL, so
+// other Cline endpoints (the account and quota API) use exactly the same
+// transport, connection pool and proxy as the inference data plane.
+func (c *Client) HTTPClient(proxyURL string) (*http.Client, error) {
+	return c.client(proxyURL)
 }
 
 // endpoint joins an API path onto the current root. The root is a directory
@@ -132,126 +138,6 @@ func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Rec
 		return nil, wrapTransportError(err)
 	}
 	return &Stream{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: resp.Body, cancel: cancel}, nil
-}
-
-// JSON performs a non-streaming GET and returns the raw body.
-func (c *Client) JSON(ctx context.Context, credential credentials.Record, path string, timeout time.Duration) (int, []byte, error) {
-	client, err := c.client(credential.ProxyURL)
-	if err != nil {
-		return 0, nil, err
-	}
-	if timeout <= 0 {
-		timeout = 20 * time.Second
-	}
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodGet, c.endpoint(path), nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+credential.APIKey)
-	httpReq.Header.Set("Accept", "application/json")
-	httpReq.Header.Set("User-Agent", version.Name+"/"+version.Version)
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return 0, nil, wrapTransportError(err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if err != nil {
-		return resp.StatusCode, nil, err
-	}
-	return resp.StatusCode, body, nil
-}
-
-// PlanUsage fetches the Cline quota snapshot for a credential.
-func (c *Client) PlanUsage(ctx context.Context, credential credentials.Record) (credentials.Usage, error) {
-	usage := credentials.Usage{Status: "ok", CheckedAt: time.Now().UTC()}
-
-	status, body, err := c.JSON(ctx, credential, "/users/me/plan/usage-limits", 20*time.Second)
-	if err != nil {
-		return credentials.Usage{Status: classifyUsageError(err, 0), Error: err.Error(), CheckedAt: time.Now().UTC()}, nil
-	}
-	if status < 200 || status >= 300 {
-		return credentials.Usage{Status: classifyUsageError(nil, status), Error: fmt.Sprintf("Cline returned HTTP %d for the usage limit query", status), CheckedAt: time.Now().UTC()}, nil
-	}
-
-	if data, ok := unwrapEnvelope(body); ok {
-		body = data
-	}
-	var limits struct {
-		Limits []struct {
-			Type        string   `json:"type"`
-			PercentUsed *float64 `json:"percentUsed"`
-			ResetsAt    string   `json:"resetsAt"`
-		} `json:"limits"`
-	}
-	if err := json.Unmarshal(body, &limits); err != nil {
-		usage.Status = "unavailable"
-		usage.Error = "Cline returned an unrecognized usage limit payload"
-		return usage, nil
-	}
-	for _, limit := range limits.Limits {
-		if strings.TrimSpace(limit.Type) == "" {
-			continue
-		}
-		value := limit.PercentUsed
-		if value != nil && *value < 0 {
-			value = nil
-		}
-		usage.Limits = append(usage.Limits, credentials.UsageLimit{Type: limit.Type, PercentUsed: value, ResetsAt: limit.ResetsAt})
-	}
-	usage.Raw = append(json.RawMessage(nil), body...)
-
-	if status, body, err := c.JSON(ctx, credential, "/users/me/plan", 20*time.Second); err == nil && status >= 200 && status < 300 {
-		if data, ok := unwrapEnvelope(body); ok {
-			body = data
-		}
-		var plan struct {
-			CurrentPeriodEnd string `json:"currentPeriodEnd"`
-			Plan             *struct {
-				DisplayName string `json:"displayName"`
-			} `json:"plan"`
-		}
-		if json.Unmarshal(body, &plan) == nil {
-			if plan.Plan != nil {
-				usage.PlanName = plan.Plan.DisplayName
-			}
-			usage.PeriodEnd = plan.CurrentPeriodEnd
-		}
-	}
-	return usage, nil
-}
-
-func classifyUsageError(err error, status int) string {
-	switch {
-	case status == 401 || status == 403:
-		return "unauthorized"
-	case status == 429:
-		return "rate_limited"
-	case status >= 500:
-		return "unavailable"
-	case err != nil && errors.Is(err, context.DeadlineExceeded):
-		return "timeout"
-	case err != nil:
-		return "unavailable"
-	default:
-		return "unavailable"
-	}
-}
-
-// unwrapEnvelope handles Cline's `{"success":true,"data":{...}}` wrapper.
-func unwrapEnvelope(body []byte) ([]byte, bool) {
-	var envelope struct {
-		Success bool            `json:"success"`
-		Data    json.RawMessage `json:"data"`
-	}
-	if json.Unmarshal(body, &envelope) != nil || !envelope.Success || len(envelope.Data) == 0 {
-		return nil, false
-	}
-	return envelope.Data, true
 }
 
 func acceptHeader(stream bool) string {

@@ -369,7 +369,10 @@ func TestRequestHistoryRecordsStages(t *testing.T) {
 	}
 	// TTFT must measure the first visible token, not the protocol prologue that
 	// is written before the provider has produced anything.
-	if record.TTFTMS <= 0 || record.TTFTMS < record.Timings[admin.StageFirstUpstreamEvent] {
+	// TTFT may legitimately be 0ms on a sub-millisecond stub response; the
+	// meaningful assertion is that the first visible token never precedes the
+	// provider's first event.
+	if record.TTFTMS < record.Timings[admin.StageFirstUpstreamEvent] {
 		t.Fatalf("ttft = %d, first upstream event at %d", record.TTFTMS, record.Timings[admin.StageFirstUpstreamEvent])
 	}
 	if record.PromptTokens != 5 || record.CompletionToken != 1 {

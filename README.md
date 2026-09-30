@@ -42,6 +42,36 @@ GET  /ready
 
 Management API and the web UI live under `/api/*` and `/`.
 
+## Console
+
+The management console is a single embedded document (`internal/serving/web`)
+that is delivered with its stylesheets and scripts inlined, so the CPA connector
+can fetch `/` once and serve the whole console from the CPA origin. The browser
+only ever talks to its own origin; the connector attaches the management token
+server-to-server.
+
+```text
+Dashboard    service identity, 24h traffic, official quota per credential, recent requests
+Credentials  add/edit/delete, key replacement, enable/disable, per-credential proxy, test, quota refresh
+Models       alias CRUD (client id -> upstream id), provider candidates, real model test with upstream errors
+Requests     filterable request viewer with per-request timings, attempts and token accounting
+Usage        official Cline quota (5h / weekly / monthly + 31-day totals) and proxy-observed traffic
+Settings     base URL, limits, affinity, gateway keys, management credentials, theme
+```
+
+Two usage sources are shown side by side and never mixed:
+
+* **Official Cline usage** comes from the account API (`/users/me`,
+  `/users/me/plan/usage-limits`, `/users/{id}/usages/daily`, `/users/{id}/balance`),
+  the same source the Cline channel monitor plugin used. It covers the whole
+  account, including other clients.
+* **Observed through ClinePassProxy** is derived from this proxy's own request
+  history.
+
+A field the upstream does not return is rendered as `—`; nothing is estimated.
+Theme supports System / Light / Dark, defaults to System, follows the CPAMP host
+theme when embedded, and persists an explicit choice in the browser.
+
 ## Authentication
 
 Three independent credentials, by design:

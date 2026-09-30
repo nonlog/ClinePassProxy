@@ -59,6 +59,12 @@ func main() {
 	history := admin.OpenHistory(settings.Get().DataDir, settings.Get().LogRetention)
 
 	server := serving.New(settings, store, history)
+	// The Cline account snapshots (plan, rolling quota, official 31-day totals)
+	// are read in the background so the management UI never blocks a page load
+	// on the upstream API.
+	pollerCtx, stopPoller := context.WithCancel(context.Background())
+	defer stopPoller()
+	server.StartOfficialPoller(pollerCtx)
 
 	httpServer := &http.Server{
 		Addr:              listen,
@@ -77,6 +83,7 @@ func main() {
 	go func() {
 		<-shutdown
 		log.Println("shutting down; draining in-flight requests")
+		stopPoller()
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(ctx); err != nil {

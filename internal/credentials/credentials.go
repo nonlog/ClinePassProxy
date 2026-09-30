@@ -26,24 +26,6 @@ const (
 	HealthExhausted = "exhausted"
 )
 
-// Usage is the last known Cline quota snapshot for a credential.
-type Usage struct {
-	Status    string          `json:"status"`
-	Error     string          `json:"error,omitempty"`
-	PlanName  string          `json:"plan_name,omitempty"`
-	PeriodEnd string          `json:"period_end,omitempty"`
-	Limits    []UsageLimit    `json:"limits,omitempty"`
-	Raw       json.RawMessage `json:"raw,omitempty"`
-	CheckedAt time.Time       `json:"checked_at,omitempty"`
-}
-
-// UsageLimit is one quota window reported by Cline.
-type UsageLimit struct {
-	Type        string   `json:"type"`
-	PercentUsed *float64 `json:"percent_used,omitempty"`
-	ResetsAt    string   `json:"resets_at,omitempty"`
-}
-
 // Record is a stored Cline credential plus its operational state.
 type Record struct {
 	ID      string `json:"id"`
@@ -64,7 +46,6 @@ type Record struct {
 	LastUsedAt        time.Time `json:"last_used_at,omitempty"`
 	ConsecutiveErrors int       `json:"consecutive_errors,omitempty"`
 	CooldownUntil     time.Time `json:"cooldown_until,omitempty"`
-	Usage             *Usage    `json:"usage,omitempty"`
 }
 
 // View is the masked projection returned by the management API.
@@ -83,7 +64,6 @@ type View struct {
 	LastUsedAt        time.Time `json:"last_used_at,omitempty"`
 	ConsecutiveErrors int       `json:"consecutive_errors,omitempty"`
 	CooldownUntil     time.Time `json:"cooldown_until,omitempty"`
-	Usage             *Usage    `json:"usage,omitempty"`
 }
 
 // Store owns the credential file and the in-memory copy.
@@ -171,9 +151,6 @@ func (s *Store) Upsert(record Record, keepSecret, keepProxy bool) (Record, error
 			record.ProxyURL = existing.ProxyURL
 		}
 		record.CreatedAt = existing.CreatedAt
-		if record.Usage == nil {
-			record.Usage = existing.Usage
-		}
 	} else {
 		record.CreatedAt = now
 	}
@@ -346,7 +323,6 @@ func (r Record) View() View {
 		LastUsedAt:        r.LastUsedAt,
 		ConsecutiveErrors: r.ConsecutiveErrors,
 		CooldownUntil:     r.CooldownUntil,
-		Usage:             r.Usage,
 	}
 	if view.Health == "" {
 		view.Health = HealthUnknown
