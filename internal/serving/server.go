@@ -199,7 +199,8 @@ type requestContext struct {
 	// streamed records that SSE headers and at least the protocol prologue have
 	// already been written, so a later failure must not append a JSON error body
 	// to the open event stream.
-	streamed bool
+	streamed  bool
+	transport []*upstream.Trace
 }
 
 type trail struct {
@@ -255,12 +256,14 @@ func (s *Server) readRequest(w http.ResponseWriter, r *http.Request, sourceForma
 	}
 
 	settings := s.Config.Get()
+	tracker.Stage("affinity_start")
 	upstreamModel, ok := models.Table{Entries: settings.Models}.Resolve(record.Model)
 	if !ok {
 		s.fail(w, tracker, http.StatusBadRequest, fmt.Errorf("model is not enabled in ClinePassProxy: %s", record.Model))
 		return nil, false
 	}
 	sessionID, sessionBy := SessionIdentity(r.Header, body, settings.AffinityHeader)
+	tracker.Stage("affinity_done")
 	record.AffinityKey = sessionID
 	record.UpstreamMode = upstreamModel
 
@@ -294,6 +297,7 @@ func (s *Server) fail(w http.ResponseWriter, tracker *admin.Tracker, status int,
 
 func (s *Server) failWithTrail(w http.ResponseWriter, request *requestContext, status int, err error) {
 	record := request.tracker.Record()
+	s.snapshotTransport(request)
 	record.Attempts = request.trail.all()
 	record.FailoverCount = len(record.Attempts)
 	final := request.tracker.Finish(status, errors.New(credentials.Sanitize(err.Error())))
@@ -336,6 +340,7 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, request *reque
 		record.AffinityReason = decision.Reason
 		record.AffinityKey = decision.AffinityKey
 		request.tracker.Stage(admin.StageCredentialSelected)
+		request.tracker.Stage("translate_start")
 
 		status, err, retryable := s.serve(w, r, request, credential, timeout)
 		if err == nil {
@@ -447,6 +452,8 @@ func (s *Server) openUpstream(r *http.Request, request *requestContext, credenti
 	record := request.tracker.Record()
 	record.UpstreamBytes = int64(len(encoded))
 	request.tracker.Stage(admin.StageUpstreamRequestStart)
+	trace := upstream.NewTrace(request.tracker.Started())
+	request.transport = append(request.transport, trace)
 
 	// The upstream deadline is independent of the client connection, but a
 	// client disconnect must still cancel the upstream request immediately.
@@ -458,6 +465,7 @@ func (s *Server) openUpstream(r *http.Request, request *requestContext, credenti
 		Body:    encoded,
 		Stream:  stream,
 		Timeout: timeout,
+		Trace:   trace,
 	})
 }
 
@@ -498,12 +506,6 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 		if record.Timings[admin.StageFirstProtocolEvent] == 0 {
 			request.tracker.Stage(admin.StageFirstProtocolEvent)
 		}
-		// TTFT must measure the frame that carries the first visible token, not
-		// the protocol prologue (message_start / response.created) that precedes
-		// the provider's first byte of content.
-		if record.Timings[admin.StageFirstTokenWrite] == 0 && chunkHasVisibleOutput(chunk) {
-			request.tracker.Stage(admin.StageFirstTokenWrite)
-		}
 		if err := write(frames); err != nil {
 			return sawDone, err
 		}
@@ -523,35 +525,6 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 	return sawDone, nil
 }
 
-// chunkHasVisibleOutput reports whether an upstream Chat Completions chunk
-// carries text, reasoning or a tool call for the client to render.
-func chunkHasVisibleOutput(raw []byte) bool {
-	root, err := models.DecodeObject(raw)
-	if err != nil {
-		return false
-	}
-	for _, rawChoice := range models.List(root["choices"]) {
-		choice := models.Object(rawChoice)
-		delta := models.Object(choice["delta"])
-		if delta == nil {
-			continue
-		}
-		if models.String(delta["content"]) != "" {
-			return true
-		}
-		if models.String(delta["reasoning_content"]) != "" || models.String(delta["reasoning"]) != "" {
-			return true
-		}
-		if len(models.List(delta["tool_calls"])) > 0 {
-			return true
-		}
-		if models.Object(delta["function_call"]) != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // observeChunk records usage and provider metadata from an upstream chunk.
 func (s *Server) observeChunk(request *requestContext, raw []byte) {
 	raw = unwrapCompletionEnvelope(raw)
@@ -560,6 +533,13 @@ func (s *Server) observeChunk(request *requestContext, raw []byte) {
 		return
 	}
 	record := request.tracker.Record()
+	if record.Stream {
+		kinds := completionKinds(root)
+		for _, kind := range kinds {
+			request.tracker.Stage("first_" + kind + "_event")
+			request.tracker.LastStage("last_" + kind + "_event")
+		}
+	}
 	if provider := models.String(root["provider"]); provider != "" && record.Provider == "" {
 		record.Provider = provider
 	}
@@ -590,6 +570,7 @@ func (s *Server) observeChunk(request *requestContext, raw []byte) {
 // finishRequest persists the completed request record.
 func (s *Server) finishRequest(request *requestContext, status int, err error) {
 	record := request.tracker.Record()
+	s.snapshotTransport(request)
 	if len(request.trail.all()) > 0 {
 		record.Attempts = request.trail.all()
 		record.FailoverCount = len(record.Attempts)

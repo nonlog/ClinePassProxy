@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
@@ -104,6 +105,7 @@ type ChatRequest struct {
 	Body    []byte
 	Stream  bool
 	Timeout time.Duration
+	Trace   *Trace
 }
 
 // ChatCompletions opens a streaming or non-streaming Chat Completions request.
@@ -121,6 +123,9 @@ func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Rec
 		timeout = 300 * time.Second
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	if req.Trace != nil {
+		requestCtx = httptrace.WithClientTrace(requestCtx, req.Trace.ClientTrace())
+	}
 
 	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint("/chat/completions"), bytes.NewReader(req.Body))
 	if err != nil {
@@ -136,6 +141,9 @@ func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Rec
 	if err != nil {
 		cancel()
 		return nil, wrapTransportError(err)
+	}
+	if req.Trace != nil {
+		req.Trace.Response(resp.Proto, resp.StatusCode)
 	}
 	return &Stream{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: resp.Body, cancel: cancel}, nil
 }

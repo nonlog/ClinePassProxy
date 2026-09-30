@@ -604,15 +604,11 @@ func (c *ResponsesStreamConverter) Usage() map[string]any {
 	if total == 0 {
 		total = c.promptTokens + c.completionTokens
 	}
-	outputDetails := map[string]any{}
-	if c.reasoningTokens > 0 {
-		outputDetails["reasoning_tokens"] = c.reasoningTokens
-	}
 	return map[string]any{
 		"input_tokens":          c.promptTokens,
 		"input_tokens_details":  map[string]any{"cached_tokens": c.cachedTokens},
 		"output_tokens":         c.completionTokens,
-		"output_tokens_details": outputDetails,
+		"output_tokens_details": map[string]any{"reasoning_tokens": c.reasoningTokens},
 		"total_tokens":          total,
 	}
 }

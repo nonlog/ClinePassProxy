@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nonlog/ClinePassProxy/internal/config"
+	"github.com/nonlog/ClinePassProxy/internal/upstream"
 )
 
 // Timing milestones recorded per request, in milliseconds from request start.
@@ -26,12 +27,18 @@ const (
 	StageFirstUpstreamEvent   = "first_upstream_event"
 	StageFirstProtocolEvent   = "first_protocol_event"
 	StageFirstDownstreamWrite = "first_downstream_write"
-	// StageFirstTokenWrite marks the write that carried the first visible token.
-	// It is the only honest time-to-first-token: the protocol prologue frames
-	// (message_start, response.created) are written long before any content.
-	StageFirstTokenWrite = "first_token_write"
-	StageStreamComplete  = "stream_complete"
-	StageRequestComplete = "request_complete"
+	// StageFirstTokenWrite is the first generated output flush (reasoning,
+	// text or tool). Visible text has its own StageFirstTextWrite milestone.
+	StageFirstTokenWrite      = "first_token_write"
+	StageFirstReasoningEvent  = "first_reasoning_event"
+	StageFirstTextEvent       = "first_text_event"
+	StageFirstToolEvent       = "first_tool_event"
+	StageFirstReasoningWrite  = "first_reasoning_write"
+	StageFirstTextWrite       = "first_text_write"
+	StageFirstToolWrite       = "first_tool_write"
+	StageFirstDownstreamFlush = "first_downstream_flush"
+	StageStreamComplete       = "stream_complete"
+	StageRequestComplete      = "request_complete"
 )
 
 // Record is one completed or failed request.
@@ -55,7 +62,13 @@ type Record struct {
 	UpstreamBytes int64 `json:"upstream_bytes"`
 	ResponseBytes int64 `json:"response_bytes"`
 
-	Timings map[string]int64 `json:"timings_ms"`
+	Timings           map[string]int64         `json:"timings_ms"`
+	TimingVersion     int                      `json:"timing_version,omitempty"`
+	Transport         []upstream.TraceSnapshot `json:"transport,omitempty"`
+	VisibleTextTTFTMS *int64                   `json:"visible_text_ttft_ms"`
+	ReasoningTTFTMS   *int64                   `json:"reasoning_ttft_ms"`
+	ToolTTFTMS        *int64                   `json:"tool_ttft_ms"`
+	FirstOutputTTFTMS *int64                   `json:"first_output_ttft_ms"`
 
 	TTFTMS          int64 `json:"ttft_ms"`
 	ProviderTTFTMS  int64 `json:"provider_ttft_ms"`
@@ -89,9 +102,10 @@ func NewTracker() *Tracker {
 	now := time.Now()
 	return &Tracker{
 		record: Record{
-			ID:        config.RandomTokenString(),
-			StartedAt: now.UTC(),
-			Timings:   map[string]int64{},
+			ID:            config.RandomTokenString(),
+			StartedAt:     now.UTC(),
+			Timings:       map[string]int64{},
+			TimingVersion: 2,
 		},
 		started: now,
 	}
@@ -99,6 +113,14 @@ func NewTracker() *Tracker {
 
 // Record returns the record under construction.
 func (t *Tracker) Record() *Record { return &t.record }
+
+// Started is the monotonic clock anchor shared by HTTP transport callbacks.
+func (t *Tracker) Started() time.Time { return t.started }
+
+// LastStage updates a last-event milestone while Stage preserves the first.
+func (t *Tracker) LastStage(stage string) {
+	t.record.Timings[stage] = time.Since(t.started).Milliseconds()
+}
 
 // SetID overrides the generated request ID.
 func (t *Tracker) SetID(id string) {
@@ -171,8 +193,19 @@ func (t *Tracker) Finish(status int, err error) Record {
 	if record.DurationMS > 0 && record.CompletionToken > 0 {
 		record.EndToEndTPS = float64(record.CompletionToken) / (float64(record.DurationMS) / 1000)
 	}
-	if value, ok := record.Timings[StageFirstTokenWrite]; ok {
-		record.TTFTMS = value
+	for stage, target := range map[string]**int64{
+		StageFirstTextWrite:      &record.VisibleTextTTFTMS,
+		StageFirstReasoningWrite: &record.ReasoningTTFTMS,
+		StageFirstToolWrite:      &record.ToolTTFTMS,
+		StageFirstTokenWrite:     &record.FirstOutputTTFTMS,
+	} {
+		if value, ok := record.Timings[stage]; ok {
+			v := value
+			*target = &v
+		}
+	}
+	if record.VisibleTextTTFTMS != nil {
+		record.TTFTMS = *record.VisibleTextTTFTMS
 	}
 	if value, ok := record.Timings[StageFirstUpstreamEvent]; ok {
 		record.ProviderTTFTMS = value

@@ -337,7 +337,9 @@ func (w *sseWriter) prepare() {
 
 func (w *sseWriter) write(tracker *admin.Tracker, frames [][]byte) error {
 	for _, frame := range frames {
-		if _, err := w.w.Write(frame); err != nil {
+		n, err := w.w.Write(frame)
+		tracker.Record().ResponseBytes += int64(n)
+		if err != nil {
 			return fmt.Errorf("%w: %v", errClientGone, err)
 		}
 	}
@@ -347,6 +349,9 @@ func (w *sseWriter) write(tracker *admin.Tracker, frames [][]byte) error {
 	}
 	if w.flusher != nil {
 		w.flusher.Flush()
+	}
+	if len(frames) > 0 {
+		markFlushed(tracker, frames)
 	}
 	return nil
 }
