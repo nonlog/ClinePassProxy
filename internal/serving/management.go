@@ -496,7 +496,7 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 	if actual := probeActualProvider(body); actual != "" {
 		result["actual_provider"] = actual
 	}
-	if err != nil {
+	if err != nil && len(providers) == 0 {
 		result["error"] = credentials.Sanitize(err.Error())
 	}
 	writeJSON(w, http.StatusOK, result)
