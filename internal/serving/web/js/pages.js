@@ -538,10 +538,110 @@
     function modelForm(entry) {
       var idInput = el("input", { value: entry ? entry.id : "", placeholder: "cline-pass/claude-sonnet-4.5" });
       var upstreamInput = el("input", { value: entry ? entry.upstream_id || "" : "", placeholder: "上游模型 ID（留空 = 同名）" });
-      var providersInput = el("input", {
-        value: entry && entry.providers ? entry.providers.join(", ") : "",
-        placeholder: "固定/允许 provider，逗号分隔（可留空）"
+      var selectedProviders = {};
+      var providerOptions = {};
+      (entry && entry.providers || []).forEach(function (name) {
+        if (typeof name === "string" && name.trim()) selectedProviders[name.trim()] = true;
       });
+
+      function providerName(item) {
+        if (typeof item === "string") return item.trim();
+        if (!item || typeof item !== "object") return "";
+        return String(item.name || item.id || item.provider || "").trim();
+      }
+
+      function addProviderItems(items) {
+        (Array.isArray(items) ? items : []).forEach(function (item) {
+          var name = providerName(item);
+          if (!name) return;
+          var status = typeof item === "object" && item ? String(item.status || "").trim() : "";
+          providerOptions[name] = { status: status || (providerOptions[name] && providerOptions[name].status) || "" };
+        });
+      }
+
+      addProviderItems(payload.providers);
+      addProviderItems(payload.discovered_providers);
+      addProviderItems(payload.observed_providers);
+      addProviderItems(entry && entry.discovered_providers);
+      addProviderItems(entry && entry.observed_providers);
+      addProviderItems(entry && entry.providers_catalog);
+      Object.keys(selectedProviders).forEach(function (name) {
+        if (!providerOptions[name]) providerOptions[name] = { status: "" };
+      });
+
+      var providerList = el("div", { class: "stack", style: "gap:4px" });
+      var providerHint = el("span", { class: "hint", text: "点击“探测 Provider”查看当前凭据可用的上游。留空表示自动路由。" });
+      var probeButton = el("button", { class: "btn small", type: "button" }, "探测 Provider");
+
+      function statusLabel(status) {
+        var labels = { available: "可用", ok: "可用", unavailable: "不可用", rate_limited: "限流", unknown: "未知" };
+        return labels[status] || status;
+      }
+
+      function renderProviderChoices() {
+        providerList.replaceChildren();
+        var names = Object.keys(providerOptions).sort();
+        if (!names.length) {
+          providerList.appendChild(el("span", { class: "muted", text: "尚未发现 Provider" }));
+          return;
+        }
+        names.forEach(function (name) {
+          var option = providerOptions[name] || {};
+          var checkbox = el("input", { type: "checkbox", checked: Boolean(selectedProviders[name]) });
+          checkbox.addEventListener("change", function () {
+            if (checkbox.checked) selectedProviders[name] = true;
+            else delete selectedProviders[name];
+          });
+          var status = option.status ? " · " + statusLabel(option.status) : "";
+          providerList.appendChild(el("label", { class: "field inline" }, [
+            checkbox,
+            el("span", { class: "mono", text: name }),
+            status ? el("span", { class: "hint", text: status }) : null
+          ]));
+        });
+      }
+
+      probeButton.addEventListener("click", function () {
+        var model = idInput.value.trim();
+        if (!model) { ui.toast("请先填写客户端模型 ID", "bad"); return; }
+        client.busy(probeButton, "探测中…", async function () {
+          try {
+            var result = await client.api("/api/models/providers/probe", {
+              method: "POST",
+              body: JSON.stringify({
+                model: model,
+                upstream_model: upstreamInput.value.trim(),
+                credential_id: typeof testCredential !== "undefined" ? testCredential.value : ""
+              })
+            });
+            addProviderItems(result && result.providers);
+            addProviderItems(result && result.available_providers);
+            renderProviderChoices();
+            var details = [];
+            if (result && result.pipeline) details.push("通道：" + result.pipeline);
+            if (result && result.actual_provider) details.push("最近命中：" + result.actual_provider);
+            var count = Object.keys(providerOptions).length;
+            providerHint.className = result && result.error && !count ? "bad-text" : "hint";
+            providerHint.textContent = count
+              ? "发现 " + count + " 个 Provider" + (details.length ? " · " + details.join(" · ") : "") +
+                (result.error ? " · 上游提示：" + result.error : "")
+              : "探测失败：" + ((result && result.error) || "上游没有返回可用 Provider");
+          } catch (error) {
+            providerHint.className = "bad-text";
+            providerHint.textContent = "探测失败：" + error.message;
+          }
+        });
+      });
+
+      var selectAllButton = el("button", { class: "btn small", type: "button", onclick: function () {
+        Object.keys(providerOptions).forEach(function (name) { selectedProviders[name] = true; });
+        renderProviderChoices();
+      } }, "全选");
+      var clearAllButton = el("button", { class: "btn small", type: "button", onclick: function () {
+        selectedProviders = {};
+        renderProviderChoices();
+      } }, "清空");
+      renderProviderChoices();
       var disabledInput = el("input", { type: "checkbox", checked: entry ? Boolean(entry.disabled) : false });
       var submit = el("button", { class: "btn primary", type: "button" }, entry ? "保存" : "添加");
       submit.addEventListener("click", function () {
@@ -553,7 +653,7 @@
         next.push({
           id: id,
           upstream_id: upstreamInput.value.trim(),
-          providers: providersInput.value.split(",").map(function (value) { return value.trim(); }).filter(Boolean),
+          providers: Object.keys(selectedProviders).filter(function (name) { return selectedProviders[name]; }),
           disabled: disabledInput.checked
         });
         close();
@@ -565,7 +665,12 @@
         body: el("div", { class: "form-grid" }, [
           el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "客户端模型 ID" }), idInput]),
           el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "上游模型 ID" }), upstreamInput]),
-          el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "固定/允许 Provider" }), providersInput]),
+          el("div", { class: "field", style: "grid-column:1/-1" }, [
+            el("span", { text: "固定/允许 Provider" }),
+            el("div", { class: "btn-row" }, [probeButton, selectAllButton, clearAllButton]),
+            providerList,
+            providerHint
+          ]),
           el("label", { class: "field inline" }, [disabledInput, el("span", { text: "禁用该别名" })])
         ]),
         actions: function (dismiss) {

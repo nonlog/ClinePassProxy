@@ -132,6 +132,11 @@ one provider gives a strict pin, while multiple providers allow any listed
 provider. The actual selected provider is still taken from Cline's response
 metadata and shown in request history.
 
+The Models page can discover the current provider catalog without generating a
+model response. It sends `POST /api/models/providers/probe` with a deliberately
+invalid `__probe__` provider, then presents the returned providers as a
+multi-select list. Leave the list empty for automatic routing.
+
 ## Session affinity
 
 Credential selection must be stable: the upstream prompt cache belongs to the

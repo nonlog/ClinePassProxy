@@ -97,6 +97,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/credentials/{id}/refresh", s.management(http.HandlerFunc(s.handleRefreshCredential)))
 	mux.Handle("GET /api/models", s.management(http.HandlerFunc(s.handleListModels)))
 	mux.Handle("POST /api/models/test", s.management(http.HandlerFunc(s.handleTestModel)))
+	mux.Handle("POST /api/models/providers/probe", s.management(http.HandlerFunc(s.handleProbeModelProviders)))
 	mux.Handle("GET /api/usage", s.management(http.HandlerFunc(s.handleUsage)))
 	mux.Handle("GET /api/requests", s.management(http.HandlerFunc(s.handleListRequests)))
 	mux.Handle("GET /api/requests/{id}", s.management(http.HandlerFunc(s.handleGetRequest)))

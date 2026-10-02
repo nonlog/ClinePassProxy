@@ -377,22 +377,247 @@ func (s *Server) handleRefreshCredential(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 	settings := s.Config.Get()
+	observedProviders := s.History.Facets()["providers"]
 	views := make([]map[string]any, 0, len(settings.Models))
 	for _, entry := range settings.Models {
 		views = append(views, map[string]any{
-			"id":          entry.ID,
-			"upstream_id": entry.UpstreamID,
-			"providers":   entry.Providers,
-			"disabled":    entry.Disabled,
-			"suggested":   defaultTestModel(settings) == entry.ID,
+			"id":                 entry.ID,
+			"upstream_id":        entry.UpstreamID,
+			"providers":          entry.Providers,
+			"observed_providers": observedProviders,
+			"disabled":           entry.Disabled,
+			"suggested":          defaultTestModel(settings) == entry.ID,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"models":           views,
-		"seen_models":      s.History.Models(50),
-		"passthrough":      len(settings.Models) == 0,
-		"default_for_test": defaultTestModel(settings),
+		"models":             views,
+		"seen_models":        s.History.Models(50),
+		"observed_providers": observedProviders,
+		"passthrough":        len(settings.Models) == 0,
+		"default_for_test":   defaultTestModel(settings),
 	})
+}
+
+type providerProbePayload struct {
+	Model         string `json:"model"`
+	UpstreamModel string `json:"upstream_model"`
+	CredentialID  string `json:"credential_id"`
+	Pipeline      string `json:"pipeline"`
+}
+
+// handleProbeModelProviders asks Cline for the provider choices for a model.
+// The deliberately invalid __probe__ provider makes Cline return its routing
+// metadata without spending inference tokens. Both routing shapes are sent so
+// this works with planner and direct Cline pipelines.
+func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Request) {
+	settings := s.Config.Get()
+	s.upstream.SetBaseURL(settings.BaseURL)
+	var payload providerProbePayload
+	if err := decodeJSON(r, &payload); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	model := strings.TrimSpace(payload.Model)
+	if model == "" {
+		writeError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	_, upstreamModel, ok := models.Table{Entries: settings.Models}.ResolveEntry(model)
+	if !ok && strings.TrimSpace(payload.UpstreamModel) == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("model is not enabled in ClinePassProxy: %s", model))
+		return
+	}
+	if !ok {
+		upstreamModel = model
+	}
+	if strings.TrimSpace(payload.UpstreamModel) != "" {
+		upstreamModel = strings.TrimSpace(payload.UpstreamModel)
+	}
+	payload.Pipeline = strings.ToLower(strings.TrimSpace(payload.Pipeline))
+	if payload.Pipeline == "" {
+		payload.Pipeline = "both"
+	}
+	credential, ok := s.probeCredential(payload.CredentialID)
+	if !ok {
+		if strings.TrimSpace(payload.CredentialID) != "" {
+			writeError(w, http.StatusNotFound, "credential not found")
+			return
+		}
+		writeError(w, http.StatusServiceUnavailable, "no enabled Cline credential is configured")
+		return
+	}
+
+	probe := map[string]any{
+		"model":      upstreamModel,
+		"messages":   []any{map[string]any{"role": "user", "content": "provider probe"}},
+		"max_tokens": 1,
+		"stream":     false,
+	}
+	applyProviderSelection(probe, []string{"__probe__"})
+	status, body, err := s.chat(ctxOrBackground(r), credential, probe, time.Duration(settings.TimeoutSeconds)*time.Second)
+	providers, detectedPipeline := providerProbeResults(body)
+	if detectedPipeline == "" {
+		detectedPipeline = payload.Pipeline
+		if detectedPipeline == "both" {
+			detectedPipeline = "unknown"
+		}
+	}
+	providerViews := make([]map[string]string, 0, len(providers))
+	for _, provider := range providers {
+		providerViews = append(providerViews, map[string]string{"name": provider, "status": "available"})
+	}
+	result := map[string]any{
+		"ok":             len(providers) > 0,
+		"model":          model,
+		"upstream_model": upstreamModel,
+		"credential":     credential.View(),
+		"pipeline":       detectedPipeline,
+		"providers":      providerViews,
+		"status":         status,
+	}
+	if actual := probeActualProvider(body); actual != "" {
+		result["actual_provider"] = actual
+	}
+	if err != nil {
+		result["error"] = credentials.Sanitize(err.Error())
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) probeCredential(id string) (credentials.Record, bool) {
+	if id = strings.TrimSpace(id); id != "" {
+		record, ok := s.Creds.Get(id)
+		return record, ok && record.Enabled && strings.TrimSpace(record.APIKey) != ""
+	}
+	enabled := s.Creds.Enabled()
+	if len(enabled) == 0 {
+		return credentials.Record{}, false
+	}
+	return enabled[0], true
+}
+
+func providerProbeResults(body []byte) ([]string, string) {
+	root, err := models.DecodeObject(body)
+	if err != nil {
+		return parseProviderListMessage(string(body)), ""
+	}
+	seen := map[string]bool{}
+	var providers []string
+	var pipeline string
+	var walk func(map[string]any)
+	walk = func(object map[string]any) {
+		for key, value := range object {
+			switch strings.ToLower(key) {
+			case "available_providers", "availableproviders":
+				for _, provider := range providerList(value) {
+					if !seen[provider] {
+						seen[provider] = true
+						providers = append(providers, provider)
+					}
+				}
+				if pipeline == "" {
+					pipeline = "direct"
+				}
+			case "message":
+				if message := models.String(value); message != "" {
+					for _, provider := range parseProviderListMessage(message) {
+						if !seen[provider] {
+							seen[provider] = true
+							providers = append(providers, provider)
+						}
+					}
+					if strings.Contains(strings.ToLower(message), "available providers are:") && pipeline == "" {
+						pipeline = "planner"
+					}
+				}
+			}
+			if nested := models.Object(value); nested != nil {
+				walk(nested)
+			}
+		}
+	}
+	walk(root)
+	return providers, pipeline
+}
+
+func providerList(value any) []string {
+	var raw []string
+	switch value := value.(type) {
+	case []any:
+		for _, item := range value {
+			provider := strings.TrimSpace(models.String(item))
+			if object := models.Object(item); object != nil {
+				provider = strings.TrimSpace(models.String(object["name"]))
+				if provider == "" {
+					provider = strings.TrimSpace(models.String(object["id"]))
+				}
+				if provider == "" {
+					provider = strings.TrimSpace(models.String(object["provider"]))
+				}
+			}
+			if provider != "" {
+				raw = append(raw, provider)
+			}
+		}
+	case map[string]any:
+		provider := strings.TrimSpace(models.String(value["name"]))
+		if provider == "" {
+			provider = strings.TrimSpace(models.String(value["id"]))
+		}
+		if provider == "" {
+			provider = strings.TrimSpace(models.String(value["provider"]))
+		}
+		if provider != "" {
+			raw = append(raw, provider)
+		}
+	case string:
+		if parsed := parseProviderListMessage(value); len(parsed) > 0 {
+			raw = parsed
+		} else {
+			for _, part := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == ';' }) {
+				part = strings.Trim(strings.TrimSpace(part), "`\"'[]")
+				if part != "" {
+					raw = append(raw, part)
+				}
+			}
+		}
+	}
+	return raw
+}
+
+func parseProviderListMessage(message string) []string {
+	marker := "available providers are:"
+	lower := strings.ToLower(message)
+	start := strings.Index(lower, marker)
+	if start < 0 {
+		return nil
+	}
+	value := strings.TrimSpace(message[start+len(marker):])
+	if end := strings.Index(value, ". "); end >= 0 {
+		value = value[:end]
+	}
+	value = strings.Trim(strings.TrimSpace(value), "[]")
+	value = strings.Trim(value, " .;\n\r\t")
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == ';' })
+	providers := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		part = strings.TrimPrefix(part, "- ")
+		part = strings.Trim(strings.TrimSpace(part), "`\"'[]")
+		if part != "" {
+			providers = append(providers, part)
+		}
+	}
+	return providers
+}
+
+func probeActualProvider(body []byte) string {
+	root, err := models.DecodeObject(body)
+	if err != nil {
+		return ""
+	}
+	provider, _ := completionProvider(root)
+	return provider
 }
 
 func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
