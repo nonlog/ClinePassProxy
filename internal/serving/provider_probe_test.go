@@ -78,6 +78,7 @@ func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
 	}
 	var response struct {
 		OK        bool `json:"ok"`
+		Status    int  `json:"status"`
 		Providers []struct {
 			Name string `json:"name"`
 		} `json:"providers"`
@@ -85,7 +86,7 @@ func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.OK || len(response.Providers) != 2 || response.Providers[0].Name != "alibaba" {
+	if !response.OK || response.Status != http.StatusBadRequest || len(response.Providers) != 2 || response.Providers[0].Name != "alibaba" {
 		t.Fatalf("probe response = %#v", response)
 	}
 }

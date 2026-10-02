@@ -615,6 +615,11 @@ func parseProviderListMessage(message string) []string {
 		value = value[:end]
 	}
 	value = strings.Trim(strings.TrimSpace(value), "[]")
+	for _, suffix := range []string{`,"type":`, `,"param":`, `,\"type\":`, `,\"param\":`} {
+		if end := strings.Index(value, suffix); end >= 0 {
+			value = value[:end]
+		}
+	}
 	value = strings.Trim(value, " .;\n\r\t")
 	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == ';' })
 	providers := make([]string, 0, len(parts))
