@@ -408,7 +408,7 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	upstreamModel, ok := models.Table{Entries: settings.Models}.Resolve(payload.Model)
+	entry, upstreamModel, ok := models.Table{Entries: settings.Models}.ResolveEntry(payload.Model)
 	if !ok {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("model is not enabled in ClinePassProxy: %s", payload.Model))
 		return
@@ -435,12 +435,14 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		payload.Prompt = "Reply with the single word: ready"
 	}
 	started := time.Now()
-	status, body, err := s.chat(ctxOrBackground(r), credential, map[string]any{
+	testPayload := map[string]any{
 		"model":      upstreamModel,
 		"messages":   []any{map[string]any{"role": "user", "content": payload.Prompt}},
 		"max_tokens": 64,
 		"stream":     false,
-	}, time.Duration(settings.TimeoutSeconds)*time.Second)
+	}
+	applyProviderSelection(testPayload, entry.Providers)
+	status, body, err := s.chat(ctxOrBackground(r), credential, testPayload, time.Duration(settings.TimeoutSeconds)*time.Second)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "latency_ms": latency, "error": credentials.Sanitize(err.Error())})

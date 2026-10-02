@@ -540,7 +540,7 @@
       var upstreamInput = el("input", { value: entry ? entry.upstream_id || "" : "", placeholder: "上游模型 ID（留空 = 同名）" });
       var providersInput = el("input", {
         value: entry && entry.providers ? entry.providers.join(", ") : "",
-        placeholder: "provider 候选，逗号分隔（可留空）"
+        placeholder: "固定/允许 provider，逗号分隔（可留空）"
       });
       var disabledInput = el("input", { type: "checkbox", checked: entry ? Boolean(entry.disabled) : false });
       var submit = el("button", { class: "btn primary", type: "button" }, entry ? "保存" : "添加");
@@ -565,7 +565,7 @@
         body: el("div", { class: "form-grid" }, [
           el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "客户端模型 ID" }), idInput]),
           el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "上游模型 ID" }), upstreamInput]),
-          el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "Provider 候选" }), providersInput]),
+          el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "固定/允许 Provider" }), providersInput]),
           el("label", { class: "field inline" }, [disabledInput, el("span", { text: "禁用该别名" })])
         ]),
         actions: function (dismiss) {
@@ -619,7 +619,7 @@
         el("div", { class: "card" }, ui.table([
           { label: "客户端模型 ID", render: function (row) { return el("span", { class: "mono cell-strong", text: row.entry.id }); } },
           { label: "上游模型 ID", render: function (row) { return el("span", { class: "mono", text: row.entry.upstream_id || row.entry.id }); } },
-          { label: "Provider 候选", render: function (row) { return (row.entry.providers || []).join(", ") || fmt.DASH; } },
+          { label: "固定/允许 Provider", render: function (row) { return (row.entry.providers || []).join(", ") || fmt.DASH; } },
           { label: "状态", render: function (row) { return row.entry.disabled ? ui.badge("禁用", "warn") : ui.badge("启用", "ok"); } },
           { label: "凭据可用性", render: function (row) {
               var enabled = (state.credentials || []).filter(function (view) { return view.enabled; });

@@ -111,12 +111,43 @@ func (s *Server) handleAlphaSearch(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(response)
 }
 
+// applyProviderSelection pins Cline Pass routing when a model alias declares
+// providers. Planner models consume providerOptions.gateway.only; direct
+// OpenRouter models consume provider.only. Unknown pipelines receive both
+// shapes, matching the proven switcher behavior without changing requests
+// whose model alias has no provider selection.
+func applyProviderSelection(payload map[string]any, providers []string) {
+	if len(providers) == 0 {
+		return
+	}
+	only := append([]string{}, providers...)
+	providerOptions := models.Object(payload["providerOptions"])
+	if providerOptions == nil {
+		providerOptions = map[string]any{}
+	}
+	gateway := models.Object(providerOptions["gateway"])
+	if gateway == nil {
+		gateway = map[string]any{}
+	}
+	gateway["only"] = only
+	providerOptions["gateway"] = gateway
+	payload["providerOptions"] = providerOptions
+
+	provider := models.Object(payload["provider"])
+	if provider == nil {
+		provider = map[string]any{}
+	}
+	provider["only"] = append([]string{}, providers...)
+	payload["provider"] = provider
+}
+
 // serveMessages converts Anthropic Messages to Cline Chat Completions and back.
 func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *requestContext, credential credentials.Record, timeout time.Duration) (int, error, bool) {
 	payload, err := translate.ClaudeMessagesToChatCompletions(request.raw, request.upstream, models.Bool(request.body["stream"]))
 	if err != nil {
 		return http.StatusBadRequest, err, false
 	}
+	applyProviderSelection(payload, request.providers)
 	request.tracker.Stage(admin.StageTranslateDone)
 
 	streaming := models.Bool(request.body["stream"])
@@ -185,6 +216,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 	if err != nil {
 		return http.StatusBadRequest, err, false
 	}
+	applyProviderSelection(payload, request.providers)
 	request.tracker.Stage(admin.StageTranslateDone)
 
 	translated, _ := jsonBytes(payload)
@@ -260,6 +292,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, request *requestContext, credential credentials.Record, timeout time.Duration) (int, error, bool) {
 	payload := translate.CloneMap(request.body)
 	payload["model"] = request.upstream
+	applyProviderSelection(payload, request.providers)
 	stream := models.Bool(request.body["stream"])
 	request.tracker.Stage(admin.StageTranslateDone)
 

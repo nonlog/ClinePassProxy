@@ -197,6 +197,7 @@ type requestContext struct {
 	trail     *trail
 	model     string
 	upstream  string
+	providers []string
 	sessionID string
 	sessionBy string
 	// streamed records that SSE headers and at least the protocol prologue have
@@ -260,7 +261,7 @@ func (s *Server) readRequest(w http.ResponseWriter, r *http.Request, sourceForma
 
 	settings := s.Config.Get()
 	tracker.Stage("affinity_start")
-	upstreamModel, ok := models.Table{Entries: settings.Models}.Resolve(record.Model)
+	entry, upstreamModel, ok := models.Table{Entries: settings.Models}.ResolveEntry(record.Model)
 	if !ok {
 		s.fail(w, tracker, http.StatusBadRequest, fmt.Errorf("model is not enabled in ClinePassProxy: %s", record.Model))
 		return nil, false
@@ -277,6 +278,7 @@ func (s *Server) readRequest(w http.ResponseWriter, r *http.Request, sourceForma
 		trail:     &trail{},
 		model:     record.Model,
 		upstream:  upstreamModel,
+		providers: append([]string{}, entry.Providers...),
 		sessionID: sessionID,
 		sessionBy: sessionBy,
 	}, true

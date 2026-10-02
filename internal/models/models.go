@@ -23,26 +23,34 @@ type Table struct {
 // Resolve returns the upstream model ID for a client-facing model ID.
 // An empty alias table means the model ID is passed through unchanged.
 func (t Table) Resolve(id string) (string, bool) {
+	_, upstream, ok := t.ResolveEntry(id)
+	return upstream, ok
+}
+
+// ResolveEntry returns the complete alias selected for a client-facing model
+// ID, including any configured upstream provider allow-list.
+func (t Table) ResolveEntry(id string) (Entry, string, bool) {
 	id = strings.TrimSpace(id)
 	if id == "" {
-		return "", false
+		return Entry{}, "", false
 	}
 	if len(t.Entries) == 0 {
-		return id, true
+		return Entry{ID: id, UpstreamID: id}, id, true
 	}
 	for _, entry := range t.Entries {
 		if entry.ID == id {
 			if entry.Disabled {
-				return "", false
+				return Entry{}, "", false
 			}
 			upstream := strings.TrimSpace(entry.UpstreamID)
 			if upstream == "" {
 				upstream = entry.ID
 			}
-			return upstream, true
+			entry.Providers = append([]string{}, entry.Providers...)
+			return entry, upstream, true
 		}
 	}
-	return "", false
+	return Entry{}, "", false
 }
 
 // DecodeObject unmarshals a JSON object, tolerating a JSON `null` element.

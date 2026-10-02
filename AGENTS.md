@@ -62,6 +62,10 @@ Each of these was a real defect found in review. They are invariants, not prefer
 - **Connector panel.** The browser only ever talks to CPA. The connector serves the
   console and forwards its API calls server-to-server, so the management token stays
   server-side and the in-network proxy address never has to resolve from a browser.
+- **Provider pinning.** A model alias's `providers` list is an allow-list: inject it
+  as both `provider.only` and `providerOptions.gateway.only` because Cline Pass
+  planner and direct pipelines consume different shapes. One value is a strict pin;
+  the actual provider remains response metadata, not a guessed request value.
 
 ## Supported surface
 

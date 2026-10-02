@@ -58,7 +58,7 @@ server-to-server.
 ```text
 Dashboard    service identity, 24h traffic, official quota per credential, recent requests
 Credentials  add/edit/delete, key replacement, enable/disable, per-credential proxy, test, quota refresh
-Models       alias CRUD (client id -> upstream id), provider candidates, real model test with upstream errors
+Models       alias CRUD (client id -> upstream id), provider allow-list/pinning, real model test with upstream errors
 Requests     filterable request viewer with per-request timings, attempts and token accounting
 Usage        official Cline quota (5h / weekly / monthly + 31-day totals) and proxy-observed traffic
 Settings     base URL, limits, affinity, gateway keys, management credentials, theme
@@ -124,6 +124,13 @@ normal shared-network value is `http://commandcode-proxy:8787`. Set a separate
 
 An empty alias table means model IDs pass through to Cline unchanged. Once any
 alias exists, only listed IDs are accepted, which keeps the proxy fail-closed.
+
+When a model alias has `providers`, CPP pins the request to that allow-list by
+adding both `provider.only` and `providerOptions.gateway.only`. Cline Pass uses
+the latter for its planner path and the former for its direct OpenRouter path;
+one provider gives a strict pin, while multiple providers allow any listed
+provider. The actual selected provider is still taken from Cline's response
+metadata and shown in request history.
 
 ## Session affinity
 
