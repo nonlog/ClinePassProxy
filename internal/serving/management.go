@@ -447,15 +447,33 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	probe := map[string]any{
-		"model":      upstreamModel,
-		"messages":   []any{map[string]any{"role": "user", "content": "provider probe"}},
-		"max_tokens": 1,
-		"stream":     false,
+	probeTimeout := time.Duration(settings.TimeoutSeconds) * time.Second
+	if probeTimeout <= 0 || probeTimeout > 30*time.Second {
+		probeTimeout = 30 * time.Second
 	}
-	applyProviderSelection(probe, []string{"__probe__"})
-	status, body, err := s.chat(ctxOrBackground(r), credential, probe, time.Duration(settings.TimeoutSeconds)*time.Second)
-	providers, detectedPipeline := providerProbeResults(body)
+	var status int
+	var body []byte
+	var err error
+	var providers []string
+	var detectedPipeline string
+	for _, pipeline := range []string{"planner", "direct"} {
+		probe := map[string]any{
+			"model":      upstreamModel,
+			"messages":   []any{map[string]any{"role": "user", "content": "provider probe"}},
+			"max_tokens": 1,
+			"stream":     false,
+		}
+		if pipeline == "planner" {
+			probe["providerOptions"] = map[string]any{"gateway": map[string]any{"only": []string{"__probe__"}}}
+		} else {
+			probe["provider"] = map[string]any{"only": []string{"__probe__"}}
+		}
+		status, body, err = s.chat(ctxOrBackground(r), credential, probe, probeTimeout)
+		providers, detectedPipeline = providerProbeResults(body)
+		if len(providers) > 0 {
+			break
+		}
+	}
 	if detectedPipeline == "" {
 		detectedPipeline = payload.Pipeline
 		if detectedPipeline == "both" {
@@ -518,7 +536,7 @@ func providerProbeResults(body []byte) ([]string, string) {
 				if pipeline == "" {
 					pipeline = "direct"
 				}
-			case "message":
+			case "message", "error":
 				if message := models.String(value); message != "" {
 					for _, provider := range parseProviderListMessage(message) {
 						if !seen[provider] {
