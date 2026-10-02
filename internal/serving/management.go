@@ -48,6 +48,8 @@ func (s *Server) management(next http.Handler) http.Handler {
 type configView struct {
 	DataDir              string         `json:"data_dir"`
 	BaseURL              string         `json:"base_url"`
+	SearchBaseURL        string         `json:"search_base_url"`
+	SearchAPIKeySet      bool           `json:"search_api_key_set"`
 	GatewayKeys          []string       `json:"gateway_keys"`
 	GatewayKeyCount      int            `json:"gateway_key_count"`
 	AllowUnauthenticated bool           `json:"allow_unauthenticated"`
@@ -64,6 +66,8 @@ type configView struct {
 
 type configUpdate struct {
 	BaseURL              *string         `json:"base_url"`
+	SearchBaseURL        *string         `json:"search_base_url"`
+	SearchAPIKey         *string         `json:"search_api_key"`
 	GatewayKeys          *[]string       `json:"gateway_keys"`
 	AllowUnauthenticated *bool           `json:"allow_unauthenticated"`
 	ManagementToken      *string         `json:"management_token"`
@@ -86,6 +90,8 @@ func viewOf(settings config.Config) configView {
 	return configView{
 		DataDir:              settings.DataDir,
 		BaseURL:              settings.BaseURL,
+		SearchBaseURL:        settings.SearchBaseURL,
+		SearchAPIKeySet:      strings.TrimSpace(settings.SearchAPIKey) != "",
 		GatewayKeys:          keys,
 		GatewayKeyCount:      len(settings.GatewayKeys),
 		AllowUnauthenticated: settings.AllowUnauthenticated,
@@ -114,6 +120,12 @@ func (s *Server) handlePutConfig(w http.ResponseWriter, r *http.Request) {
 	current := s.Config.Get()
 	if update.BaseURL != nil {
 		current.BaseURL = *update.BaseURL
+	}
+	if update.SearchBaseURL != nil {
+		current.SearchBaseURL = *update.SearchBaseURL
+	}
+	if update.SearchAPIKey != nil {
+		current.SearchAPIKey = *update.SearchAPIKey
 	}
 	if update.GatewayKeys != nil {
 		current.GatewayKeys = *update.GatewayKeys

@@ -44,6 +44,73 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	s.dispatch(w, r, request)
 }
 
+// handleAlphaSearch forwards the Codex SearchRequest contract to the
+// configured CommandCodeProxy. Cline itself does not expose /alpha/search, so
+// this adapter deliberately keeps search out of the Cline credential pool.
+func (s *Server) handleAlphaSearch(w http.ResponseWriter, r *http.Request) {
+	settings := s.Config.Get()
+	if strings.TrimSpace(settings.SearchBaseURL) == "" {
+		writeError(w, http.StatusServiceUnavailable, "Codex search is not configured")
+		return
+	}
+
+	limit := s.limitBytes()
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "read search request body: "+err.Error())
+		return
+	}
+	if int64(len(raw)) > limit {
+		writeError(w, http.StatusRequestEntityTooLarge, "search request body exceeds the configured limit")
+		return
+	}
+	if _, err := models.DecodeObject(raw); err != nil {
+		writeError(w, http.StatusBadRequest, "search request body must be a JSON object")
+		return
+	}
+
+	searchKey := strings.TrimSpace(settings.SearchAPIKey)
+	if searchKey == "" {
+		// A shared data-plane key is a useful zero-configuration deployment. A
+		// dedicated search_api_key can be set when CCP and CPP use separate keys.
+		searchKey = bearerToken(r)
+	}
+	if searchKey == "" {
+		writeError(w, http.StatusUnauthorized, "CommandCodeProxy search API key is not configured")
+		return
+	}
+
+	s.search.SetBaseURL(settings.SearchBaseURL)
+	stream, err := s.search.PostJSON(r.Context(), searchKey, "/v1/alpha/search", raw, time.Duration(settings.TimeoutSeconds)*time.Second)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, credentials.Sanitize(err.Error()))
+		return
+	}
+	defer stream.Close()
+	if stream.StatusCode < 200 || stream.StatusCode >= 300 {
+		status, upstreamErr := upstreamError(stream, "CommandCode search")
+		writeError(w, status, upstreamErr.Error())
+		return
+	}
+
+	response, err := readAll(stream, limit)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, credentials.Sanitize(err.Error()))
+		return
+	}
+	if _, err := models.DecodeObject(response); err != nil {
+		writeError(w, http.StatusBadGateway, "CommandCode search returned invalid JSON")
+		return
+	}
+	contentType := stream.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = "application/json"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(response)
+}
+
 // serveMessages converts Anthropic Messages to Cline Chat Completions and back.
 func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *requestContext, credential credentials.Record, timeout time.Duration) (int, error, bool) {
 	payload, err := translate.ClaudeMessagesToChatCompletions(request.raw, request.upstream, models.Bool(request.body["stream"]))

@@ -30,6 +30,7 @@ type Server struct {
 	History *admin.History
 
 	upstream *upstream.Client
+	search   *upstream.Client
 	selector *affinity.Selector
 
 	startedAt time.Time
@@ -45,6 +46,7 @@ func New(settings *config.Store, creds *credentials.Store, history *admin.Histor
 		Creds:     creds,
 		History:   history,
 		upstream:  upstream.New(settings.Get().BaseURL),
+		search:    upstream.New(settings.Get().SearchBaseURL),
 		selector:  affinity.NewSelector(),
 		startedAt: time.Now().UTC(),
 		official:  newOfficialCache(),
@@ -77,6 +79,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/messages", s.inference(s.handleMessages))
 	mux.Handle("POST /v1/responses", s.inference(s.handleResponses))
 	mux.Handle("POST /v1/chat/completions", s.inference(s.handleChatCompletions))
+	mux.Handle("POST /v1/alpha/search", s.inference(s.handleAlphaSearch))
 
 	// Management API.
 	mux.HandleFunc("GET /api/version", s.handleVersion)

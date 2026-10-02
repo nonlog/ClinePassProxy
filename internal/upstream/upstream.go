@@ -110,31 +110,41 @@ type ChatRequest struct {
 
 // ChatCompletions opens a streaming or non-streaming Chat Completions request.
 func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Record, req ChatRequest) (*Stream, error) {
-	client, err := c.client(credential.ProxyURL)
+	return c.post(ctx, credential.ProxyURL, credential.APIKey, "/chat/completions", req.Body, req.Stream, req.Timeout, req.Trace)
+}
+
+// PostJSON sends a bounded JSON request to an arbitrary path on the client's
+// configured API root. It is used for the Codex-compatible search adapter,
+// whose upstream is CommandCodeProxy rather than Cline Chat Completions.
+func (c *Client) PostJSON(ctx context.Context, apiKey, path string, body []byte, timeout time.Duration) (*Stream, error) {
+	return c.post(ctx, "", apiKey, path, body, false, timeout, nil)
+}
+
+func (c *Client) post(ctx context.Context, proxyURL, apiKey, path string, body []byte, stream bool, requestTimeout time.Duration, trace *Trace) (*Stream, error) {
+	client, err := c.client(proxyURL)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(credential.APIKey) == "" {
+	if strings.TrimSpace(apiKey) == "" {
 		return nil, errors.New("credential has no api key")
 	}
 
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = 300 * time.Second
+	if requestTimeout <= 0 {
+		requestTimeout = 300 * time.Second
 	}
-	requestCtx, cancel := context.WithTimeout(ctx, timeout)
-	if req.Trace != nil {
-		requestCtx = httptrace.WithClientTrace(requestCtx, req.Trace.ClientTrace())
+	requestCtx, cancel := context.WithTimeout(ctx, requestTimeout)
+	if trace != nil {
+		requestCtx = httptrace.WithClientTrace(requestCtx, trace.ClientTrace())
 	}
 
-	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint("/chat/completions"), bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequestWithContext(requestCtx, http.MethodPost, c.endpoint(path), bytes.NewReader(body))
 	if err != nil {
 		cancel()
 		return nil, err
 	}
-	httpReq.Header.Set("Authorization", "Bearer "+credential.APIKey)
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", acceptHeader(req.Stream))
+	httpReq.Header.Set("Accept", acceptHeader(stream))
 	httpReq.Header.Set("User-Agent", version.Name+"/"+version.Version)
 
 	resp, err := client.Do(httpReq)
@@ -142,8 +152,8 @@ func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Rec
 		cancel()
 		return nil, wrapTransportError(err)
 	}
-	if req.Trace != nil {
-		req.Trace.Response(resp.Proto, resp.StatusCode)
+	if trace != nil {
+		trace.Response(resp.Proto, resp.StatusCode)
 	}
 	return &Stream{StatusCode: resp.StatusCode, Header: resp.Header.Clone(), Body: resp.Body, cancel: cancel}, nil
 }

@@ -68,6 +68,7 @@ Each of these was a real defect found in review. They are invariants, not prefer
 ```
 POST /v1/messages          -> Cline Chat Completions -> native Claude Messages SSE
 POST /v1/responses         -> Cline Chat Completions -> native Responses SSE
+POST /v1/alpha/search      -> configured CommandCodeProxy search adapter
 POST /v1/chat/completions  -> minimal normalization  -> Cline SSE / non-stream
 GET  /health, GET /ready
 

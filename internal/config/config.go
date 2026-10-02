@@ -33,6 +33,15 @@ type Config struct {
 
 	BaseURL string `json:"base_url"`
 
+	// SearchBaseURL is the optional CommandCodeProxy API root used by the
+	// Codex-compatible /v1/alpha/search adapter. It is intentionally separate
+	// from the Cline upstream URL because Cline does not provide this endpoint.
+	SearchBaseURL string `json:"search_base_url"`
+	// SearchAPIKey authenticates the configured search proxy. When empty, the
+	// incoming gateway key is forwarded instead, which is useful when both
+	// proxies deliberately share one data-plane key.
+	SearchAPIKey string `json:"search_api_key"`
+
 	// GatewayKeys authenticate inference clients (NewAPI channel #53).
 	// An empty list closes the inference API unless AllowUnauthenticated is set.
 	GatewayKeys []string `json:"gateway_keys"`
@@ -73,6 +82,8 @@ func Defaults() Config {
 	return Config{
 		DataDir:             dataDir,
 		BaseURL:             DefaultBaseURL,
+		SearchBaseURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("CLINEPASSPROXY_SEARCH_BASE_URL")), "/"),
+		SearchAPIKey:        strings.TrimSpace(os.Getenv("CLINEPASSPROXY_SEARCH_API_KEY")),
 		Models:              []models.Entry{},
 		TimeoutSeconds:      300,
 		MaxResponseBytes:    64 << 20,
@@ -96,6 +107,18 @@ func (c *Config) Validate() error {
 	}
 	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("base_url must not carry userinfo, query or fragment")
+	}
+	if search := strings.TrimSpace(c.SearchBaseURL); search != "" {
+		searchURL, err := url.Parse(search)
+		if err != nil || searchURL.Scheme == "" || searchURL.Host == "" {
+			return errors.New("search_base_url must be an absolute http(s) URL")
+		}
+		if searchURL.Scheme != "https" && searchURL.Scheme != "http" {
+			return errors.New("search_base_url must use http or https")
+		}
+		if searchURL.User != nil || searchURL.RawQuery != "" || searchURL.Fragment != "" {
+			return errors.New("search_base_url must not carry userinfo, query or fragment")
+		}
 	}
 	if c.TimeoutSeconds < 10 || c.TimeoutSeconds > 3600 {
 		return errors.New("timeout_seconds must be between 10 and 3600")
@@ -240,6 +263,8 @@ func (s *Store) save(cfg Config) error {
 
 func normalize(cfg Config) Config {
 	cfg.BaseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+	cfg.SearchBaseURL = strings.TrimRight(strings.TrimSpace(cfg.SearchBaseURL), "/")
+	cfg.SearchAPIKey = strings.TrimSpace(cfg.SearchAPIKey)
 	cfg.ManagementUser = strings.TrimSpace(cfg.ManagementUser)
 	if cfg.ManagementUser == "" {
 		cfg.ManagementUser = "admin"

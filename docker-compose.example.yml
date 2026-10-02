@@ -14,6 +14,8 @@ services:
     environment:
       CLINEPASSPROXY_DATA_DIR: /var/lib/clinepassproxy
       CLINEPASSPROXY_LISTEN: 0.0.0.0:8788
+      CLINEPASSPROXY_SEARCH_BASE_URL: ${CLINEPASSPROXY_SEARCH_BASE_URL:-http://commandcode-proxy:8787}
+      CLINEPASSPROXY_SEARCH_API_KEY: ${CLINEPASSPROXY_SEARCH_API_KEY:-}
     expose:
       - "8788"
     networks:
