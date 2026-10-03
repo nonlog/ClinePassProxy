@@ -33,6 +33,18 @@ func TestProviderProbeResults(t *testing.T) {
 			wantPipe: "planner",
 			want:     []string{"alibaba", "runware"},
 		},
+		{
+			name:     "direct metadata embedded in error string",
+			body:     `{"error":"inference request failed: {\"error\":{\"metadata\":{\"available_providers\":[\"open-inference\",\"relace\",\"deepinfra\"]}}}"}`,
+			wantPipe: "direct",
+			want:     []string{"open-inference", "relace", "deepinfra"},
+		},
+		{
+			name:     "planner JSON embedded in error string",
+			body:     `{"error":"Cline Vercel failed: {\"error\":{\"message\":\"Available providers are: alibaba, deepseek, runware\",\"type\":\"invalid_request_error\",\"param\":{\"modelId\":\"deepseek/deepseek-v4.1-flash\"}}}"}`,
+			wantPipe: "planner",
+			want:     []string{"alibaba", "deepseek", "runware"},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -114,7 +126,7 @@ func TestProbeModelProvidersFallsBackToDirectShape(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"metadata":{"available_providers":["runware"]}}}`))
+		_, _ = w.Write([]byte(`{"error":"Openrouter returned HTTP 404: {\"error\":{\"metadata\":{\"available_providers\":[\"runware\"]}}}"}`))
 	}))
 	defer cline.Close()
 

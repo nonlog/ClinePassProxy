@@ -138,6 +138,7 @@ func TestConnectorForwardsEveryConsolePath(t *testing.T) {
 		"/v0/management/clinepassproxy/credentials/www/refresh": "/api/credentials/www/refresh",
 		"/v0/management/clinepassproxy/models":                  "/api/models",
 		"/v0/management/clinepassproxy/models/test":             "/api/models/test",
+		"/v0/management/clinepassproxy/models/providers/probe":  "/api/models/providers/probe",
 		"/v0/management/clinepassproxy/usage":                   "/api/usage",
 		"/v0/management/clinepassproxy/requests":                "/api/requests",
 		"/v0/management/clinepassproxy/requests/req-1":          "/api/requests/req-1",
@@ -150,4 +151,13 @@ func TestConnectorForwardsEveryConsolePath(t *testing.T) {
 	if got := upstreamPath("/v0/management/clinepassproxy/nope"); got != "" {
 		t.Errorf("unknown path mapped to %q", got)
 	}
+}
+
+func TestConnectorAdvertisesProviderProbeRoute(t *testing.T) {
+	for _, route := range NewService().Routes() {
+		if route.Method == http.MethodPost && route.Path == "/v0/management/clinepassproxy/models/providers/probe" {
+			return
+		}
+	}
+	t.Fatal("provider probe route is not advertised by the connector")
 }

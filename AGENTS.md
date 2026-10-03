@@ -66,6 +66,14 @@ Each of these was a real defect found in review. They are invariants, not prefer
   as both `provider.only` and `providerOptions.gateway.only` because Cline Pass
   planner and direct pipelines consume different shapes. One value is a strict pin;
   the actual provider remains response metadata, not a guessed request value.
+- **Provider discovery.** Catalogs belong to the specific upstream model being
+  probed. Never use aggregate request-history providers as a model's catalog.
+  History entries and saved selections are unconfirmed until an upstream probe
+  lists them; a failed probe stays a failure even when history is nonempty.
+  Parse Cline's embedded provider-error JSON before inspecting its fields.
+- **Management route parity.** Any management endpoint called by the console
+  must also be advertised by `cpa-connector` and verified through the CPA origin.
+  Deploy the Actions-built connector when its routes change, not only the proxy.
 
 ## Supported surface
 

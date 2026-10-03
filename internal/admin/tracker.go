@@ -376,6 +376,31 @@ func (h *History) Facets() map[string][]string {
 	return out
 }
 
+// ProvidersForModel returns the distinct providers observed for one client
+// model alias. It deliberately uses the recorded request model rather than
+// the upstream model, because the management console edits aliases.
+func (h *History) ProvidersForModel(model string) []string {
+	model = strings.TrimSpace(model)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	seen := map[string]bool{}
+	for _, record := range h.records {
+		if model == "" || record.Model != model {
+			continue
+		}
+		provider := strings.TrimSpace(record.Provider)
+		if provider != "" {
+			seen[provider] = true
+		}
+	}
+	providers := make([]string, 0, len(seen))
+	for provider := range seen {
+		providers = append(providers, provider)
+	}
+	sort.Strings(providers)
+	return providers
+}
+
 // Find returns one record by ID.
 func (h *History) Find(id string) (Record, bool) {
 	h.mu.RLock()

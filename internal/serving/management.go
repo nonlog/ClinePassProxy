@@ -380,11 +380,12 @@ func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 	observedProviders := s.History.Facets()["providers"]
 	views := make([]map[string]any, 0, len(settings.Models))
 	for _, entry := range settings.Models {
+		modelObservedProviders := s.History.ProvidersForModel(entry.ID)
 		views = append(views, map[string]any{
 			"id":                 entry.ID,
 			"upstream_id":        entry.UpstreamID,
 			"providers":          entry.Providers,
-			"observed_providers": observedProviders,
+			"observed_providers": modelObservedProviders,
 			"disabled":           entry.Disabled,
 			"suggested":          defaultTestModel(settings) == entry.ID,
 		})
@@ -538,7 +539,16 @@ func providerProbeResults(body []byte) ([]string, string) {
 				}
 			case "message", "error":
 				if message := models.String(value); message != "" {
-					for _, provider := range parseProviderListMessage(message) {
+					// Cline wraps the provider's JSON error in a prefixed string.
+					if start := strings.IndexByte(message, '{'); start >= 0 {
+						var embedded map[string]any
+						if json.NewDecoder(strings.NewReader(message[start:])).Decode(&embedded) == nil {
+							walk(embedded)
+							continue
+						}
+					}
+					parsed := parseProviderListMessage(message)
+					for _, provider := range parsed {
 						if !seen[provider] {
 							seen[provider] = true
 							providers = append(providers, provider)

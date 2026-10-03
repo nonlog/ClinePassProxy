@@ -193,6 +193,7 @@ func (s *Service) Routes() []Route {
 		{"POST", "/v0/management/clinepassproxy/credentials/{id}/refresh", "Refresh credential quota"},
 		{"GET", "/v0/management/clinepassproxy/models", "Model alias table"},
 		{"POST", "/v0/management/clinepassproxy/models/test", "Issue a test completion"},
+		{"POST", "/v0/management/clinepassproxy/models/providers/probe", "Discover upstream providers for a model"},
 		{"GET", "/v0/management/clinepassproxy/usage", "Usage summary"},
 		{"GET", "/v0/management/clinepassproxy/requests", "Request diagnostics"},
 		{"GET", "/v0/management/clinepassproxy/requests/{id}", "One request diagnostic record"},
