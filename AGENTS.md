@@ -79,6 +79,7 @@ Each of these was a real defect found in review. They are invariants, not prefer
 
 ```
 POST /v1/messages          -> Cline Chat Completions -> native Claude Messages SSE
+                              (Anthropic web_search_* -> CommandCodeProxy native search)
 POST /v1/responses         -> Cline Chat Completions -> native Responses SSE
 POST /v1/alpha/search      -> configured CommandCodeProxy search adapter
 POST /v1/chat/completions  -> minimal normalization  -> Cline SSE / non-stream
@@ -88,6 +89,12 @@ management plane (never inference):
 GET  /api/dashboard, /api/official, /api/status, /api/config, /api/models,
      /api/usage, /api/requests, /api/credentials
 ```
+
+Claude's versioned `web_search_*` server tools are not ordinary client
+functions. Requests containing them must preserve the original Anthropic body
+and be forwarded to CommandCodeProxy `/v1/messages`, which returns
+`server_tool_use` and `web_search_tool_result`. Never convert these tools into
+OpenAI function tools or route them through the Cline credential pool.
 
 Three independent credentials:
 

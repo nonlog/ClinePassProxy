@@ -18,6 +18,11 @@ Codex search requests use the optional `/v1/alpha/search` adapter, which
 forwards the request to CommandCodeProxy on the shared Docker network. Cline
 does not provide this endpoint.
 
+Claude Code's Anthropic `web_search_*` server-tool requests are detected on
+`/v1/messages` and forwarded to CommandCodeProxy's Anthropic endpoint. They do
+not become ordinary Cline function tools, because Claude Code requires native
+`server_tool_use` and `web_search_tool_result` blocks.
+
 ```text
 CPAMP -> ClinePassProxy Connector (management only) -> ClinePassProxy Management API
 ```
@@ -38,6 +43,7 @@ changing the request the provider sees.
 
 ```text
 POST /v1/messages          Claude Messages  -> Cline Chat Completions -> native Claude SSE
+                             (native web_search_* -> CommandCodeProxy /v1/messages)
 POST /v1/responses         OpenAI Responses -> Cline Chat Completions -> native Responses SSE
 POST /v1/chat/completions  minimal normalization -> Cline SSE / JSON
 POST /v1/alpha/search      Codex SearchRequest -> CommandCodeProxy /v1/alpha/search
@@ -102,7 +108,7 @@ another component already authenticates callers.
 | `CLINEPASSPROXY_DATA_DIR` | `/var/lib/clinepassproxy` | Persistent state directory |
 | `CLINEPASSPROXY_LISTEN` | `0.0.0.0:8788` | Listen address |
 | `CLINEPASSPROXY_PORT` | `8788` | Port used when `CLINEPASSPROXY_LISTEN` is unset |
-| `CLINEPASSPROXY_SEARCH_BASE_URL` | unset | CommandCodeProxy API root for the Codex search adapter |
+| `CLINEPASSPROXY_SEARCH_BASE_URL` | unset | CommandCodeProxy API root for Codex search and Claude native web search |
 | `CLINEPASSPROXY_SEARCH_API_KEY` | unset | Optional dedicated CommandCodeProxy data-plane key; when unset, the incoming gateway key is forwarded |
 
 Persistent state:
@@ -117,10 +123,12 @@ Everything else is editable from the Settings tab: base URL, timeout, response
 size limit, retry/failover, affinity policy, log retention, gateway key rotation,
 management credentials and the model alias table.
 
-To enable the search adapter, set `CLINEPASSPROXY_SEARCH_BASE_URL` or update
+To enable search forwarding, set `CLINEPASSPROXY_SEARCH_BASE_URL` or update
 `search_base_url` through the authenticated `PUT /api/config` endpoint. The
 normal shared-network value is `http://commandcode-proxy:8787`. Set a separate
-`search_api_key` when the two proxies do not share a data-plane key.
+`search_api_key` when the two proxies do not share a data-plane key. Codex
+requests use `/v1/alpha/search`; Claude Code native `web_search_*` requests use
+`/v1/messages` and preserve the Anthropic server-tool response blocks.
 
 An empty alias table means model IDs pass through to Cline unchanged. Once any
 alias exists, only listed IDs are accepted, which keeps the proxy fail-closed.

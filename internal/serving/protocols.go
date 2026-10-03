@@ -23,6 +23,10 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if hasNativeClaudeWebSearch(request.body) {
+		s.handleNativeClaudeWebSearch(w, r, request)
+		return
+	}
 	s.dispatch(w, r, request)
 }
 

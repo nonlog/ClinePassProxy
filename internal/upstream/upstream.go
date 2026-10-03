@@ -117,7 +117,14 @@ func (c *Client) ChatCompletions(ctx context.Context, credential credentials.Rec
 // configured API root. It is used for the Codex-compatible search adapter,
 // whose upstream is CommandCodeProxy rather than Cline Chat Completions.
 func (c *Client) PostJSON(ctx context.Context, apiKey, path string, body []byte, timeout time.Duration) (*Stream, error) {
-	return c.post(ctx, "", apiKey, path, body, false, timeout, nil)
+	return c.Post(ctx, apiKey, path, body, false, timeout)
+}
+
+// Post sends a JSON request to an arbitrary path and preserves streaming when
+// the caller asks for it. It is used for upstream APIs that expose an
+// Anthropic-shaped endpoint, such as CommandCodeProxy native web search.
+func (c *Client) Post(ctx context.Context, apiKey, path string, body []byte, stream bool, timeout time.Duration) (*Stream, error) {
+	return c.post(ctx, "", apiKey, path, body, stream, timeout, nil)
 }
 
 func (c *Client) post(ctx context.Context, proxyURL, apiKey, path string, body []byte, stream bool, requestTimeout time.Duration, trace *Trace) (*Stream, error) {
