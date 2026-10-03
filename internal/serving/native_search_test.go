@@ -11,7 +11,7 @@ import (
 
 func nativeSearchRequest(stream bool) string {
 	body := map[string]any{
-		"model":      "claude-sonnet-4.6",
+		"model":      "cline-pass/deepseek-v4.1-flash",
 		"max_tokens": 128,
 		"stream":     stream,
 		"tools": []any{map[string]any{
@@ -78,6 +78,9 @@ func TestNativeClaudeSearchForwardsStreamingRequestToCommandCodeProxy(t *testing
 		}
 		if request["stream"] != true {
 			t.Fatalf("stream flag = %v", request["stream"])
+		}
+		if request["model"] != "deepseek-v4.1-flash" {
+			t.Fatalf("CCP model alias was not normalized: %v", request["model"])
 		}
 		tools, _ := request["tools"].([]any)
 		if len(tools) != 1 || tools[0].(map[string]any)["type"] != "web_search_20250305" {

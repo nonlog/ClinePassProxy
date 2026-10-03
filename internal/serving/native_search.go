@@ -2,6 +2,7 @@ package serving
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -23,6 +24,31 @@ func hasNativeClaudeWebSearch(body map[string]any) bool {
 		}
 	}
 	return false
+}
+
+// nativeSearchModel removes CPP's client/provider alias prefix before the
+// request reaches CCP. CCP owns its own model table and registers
+// deepseek-v4.1-flash rather than cline-pass/deepseek-v4.1-flash.
+func nativeSearchModel(model string) string {
+	model = strings.TrimSpace(model)
+	if slash := strings.LastIndex(model, "/"); slash >= 0 && slash+1 < len(model) {
+		return model[slash+1:]
+	}
+	return model
+}
+
+func nativeSearchBody(request *requestContext) []byte {
+	model := nativeSearchModel(request.upstream)
+	if model == "" || model == models.String(request.body["model"]) {
+		return request.raw
+	}
+	payload := translate.CloneMap(request.body)
+	payload["model"] = model
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return request.raw
+	}
+	return raw
 }
 
 // handleNativeClaudeWebSearch lets CommandCodeProxy execute Anthropic's
@@ -52,7 +78,8 @@ func (s *Server) handleNativeClaudeWebSearch(w http.ResponseWriter, r *http.Requ
 	streaming := models.Bool(request.body["stream"])
 	s.search.SetBaseURL(settings.SearchBaseURL)
 	request.tracker.Stage(admin.StageUpstreamRequestStart)
-	stream, err := s.search.Post(r.Context(), searchKey, "/v1/messages", request.raw, streaming, time.Duration(settings.TimeoutSeconds)*time.Second)
+	body := nativeSearchBody(request)
+	stream, err := s.search.Post(r.Context(), searchKey, "/v1/messages", body, streaming, time.Duration(settings.TimeoutSeconds)*time.Second)
 	if err != nil {
 		status := http.StatusBadGateway
 		if r.Context().Err() != nil || errors.Is(err, context.Canceled) {
