@@ -85,6 +85,9 @@ func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
 			if body["provider"] != nil || body["providerOptions"] != nil {
 				t.Errorf("pipeline identification unexpectedly sent provider fields: %#v", body)
 			}
+			if models.Number(body["max_tokens"]) != 64 || models.String(models.Object(models.List(body["messages"])[0])["content"]) != "Reply with the single word: ready" {
+				t.Errorf("pipeline identification budget/prompt = %#v/%#v", body["max_tokens"], body["messages"])
+			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"choices":[{"message":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"alibaba"}}}}}]}`))
 			return

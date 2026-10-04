@@ -110,8 +110,8 @@ test("HTTP probe failure and empty catalog cannot reuse historical provider coun
 
 test("successful probes replace catalog and discard unconfirmed saved selections", async () => {
   const results = [
-    { ok: true, providers: [{ name: "runware", status: "available" }] },
-    { ok: true, providers: [{ name: "alibaba", status: "available" }] }
+    { ok: true, pipeline: "planner", providers: [{ name: "runware", status: "available" }] },
+    { ok: true, pipeline: "planner", providers: [{ name: "alibaba", status: "available" }] }
   ];
   const form = await modelForm({ probe: async () => results.shift() });
   await form.click("探测 Provider");
@@ -126,7 +126,7 @@ test("successful probes replace catalog and discard unconfirmed saved selections
 });
 
 test("changing model inputs clears stale choices and unconfirmed selections", async () => {
-  const form = await modelForm({ probe: async () => ({ ok: true, providers: ["runware"] }) });
+  const form = await modelForm({ probe: async () => ({ ok: true, pipeline: "planner", providers: ["runware"] }) });
   await form.click("探测 Provider");
   const inputs = nodes(form.modal, node => node.tag === "input" && !node.attributes.type);
   inputs[1].value = "cline-pass/deepseek-v4.1-flash";
@@ -149,4 +149,34 @@ test("late probe response cannot repopulate a different model's choices", async 
   await probing;
   assert.deepEqual(form.names(), ["saved"]);
   assert.equal(form.button("全选").disabled, true);
+});
+
+test("ignored upstream routing is explicit and cannot enable fake provider choices", async () => {
+  const form = await modelForm({ probe: async () => ({
+    ok: false, pinnable: false, pinning_status: "routing_ignored", pipeline: "planner",
+    actual_provider: "openai-compatible-private", canonical_slug: "private/deepseek-v4p1-flash-contributor",
+    error: "ignored restriction", providers: ["alibaba"]
+  }) });
+  await form.click("探测 Provider");
+  assert.match(form.modal.textContent, /当前模型不支持固定 Provider/);
+  assert.match(form.modal.textContent, /实际命中：openai-compatible-private/);
+  assert.match(form.modal.textContent, /private\/deepseek-v4p1-flash-contributor/);
+  assert.doesNotMatch(form.names().join(","), /alibaba/);
+  assert.equal(form.button("全选").disabled, true);
+});
+
+test("provider catalog without a detected pipeline is not selectable", async () => {
+  const form = await modelForm({ probe: async () => ({ ok: true, providers: ["runware"] }) });
+  await form.click("探测 Provider");
+  assert.match(form.modal.textContent, /探测失败：/);
+  assert.equal(form.button("全选").disabled, true);
+  await form.click("保存");
+  assert.deepEqual(form.saved()[0].providers, []);
+});
+
+test("editing a confirmed provider selection keeps it without requiring another probe", async () => {
+  const form = await modelForm({ entry: { providers: ["gmicloud"], provider_pipeline: "direct" } });
+  await form.click("保存");
+  assert.deepEqual(form.saved()[0].providers, ["gmicloud"]);
+  assert.equal(form.saved()[0].provider_pipeline, "direct");
 });

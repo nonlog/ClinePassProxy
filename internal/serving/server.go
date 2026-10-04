@@ -524,6 +524,9 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 			return sawDone, err
 		}
 	}
+	if err := providerSelectionMismatch(request, true); err != nil {
+		return sawDone, err
+	}
 	if done != nil {
 		frames, err := done()
 		if err != nil {

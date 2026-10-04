@@ -176,12 +176,15 @@ func applyProviderSelection(payload map[string]any, providers []string, pipeline
 // provider allow-list. Cline can silently fall back for virtual models, which
 // is worse than returning an error because it makes the console claim that a
 // request was pinned when it was not.
-func providerSelectionMismatch(request *requestContext) error {
+func providerSelectionMismatch(request *requestContext, requireEvidence ...bool) error {
 	if request == nil || len(request.providers) == 0 {
 		return nil
 	}
 	actual := strings.TrimSpace(request.tracker.Record().Provider)
 	if actual == "" {
+		if len(requireEvidence) > 0 && requireEvidence[0] {
+			return fmt.Errorf("%w: Cline did not report an actual provider; unable to verify the configured selection", errProviderSelection)
+		}
 		return nil
 	}
 	if providerAllowed(request.providers, actual) {
@@ -191,9 +194,12 @@ func providerSelectionMismatch(request *requestContext) error {
 }
 
 func providerAllowed(allowed []string, actual string) bool {
+	if len(allowed) == 0 {
+		return true
+	}
 	actual = strings.TrimSpace(actual)
 	if actual == "" {
-		return true
+		return false
 	}
 	for _, name := range allowed {
 		if providerKey(name) == providerKey(actual) {
@@ -237,7 +243,7 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 			return status, err, retryable
 		}
 		s.observeChunk(request, raw)
-		if err := providerSelectionMismatch(request); err != nil {
+		if err := providerSelectionMismatch(request, true); err != nil {
 			return http.StatusBadGateway, err, false
 		}
 		converted, err := translate.OpenAICompletionToClaude(raw, request.model, request.raw)
@@ -310,7 +316,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 			return status, err, retryable
 		}
 		s.observeChunk(request, raw)
-		if err := providerSelectionMismatch(request); err != nil {
+		if err := providerSelectionMismatch(request, true); err != nil {
 			return http.StatusBadGateway, err, false
 		}
 		converted, err := translate.OpenAICompletionToResponses(raw, request.model, request.raw, translated)
@@ -388,7 +394,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 			return status, err, retryable
 		}
 		s.observeChunk(request, raw)
-		if err := providerSelectionMismatch(request); err != nil {
+		if err := providerSelectionMismatch(request, true); err != nil {
 			return http.StatusBadGateway, err, false
 		}
 		s.finishRequest(request, http.StatusOK, nil)
@@ -646,6 +652,9 @@ func unwrapCompletionEnvelope(raw []byte) []byte {
 func upstreamMessage(body []byte, status int) string {
 	if root, err := models.DecodeObject(body); err == nil {
 		if text := models.String(models.Object(root["error"])["message"]); text != "" {
+			return credentials.Sanitize(text)
+		}
+		if text := models.String(root["error"]); text != "" {
 			return credentials.Sanitize(text)
 		}
 		if text := models.String(root["message"]); text != "" {

@@ -464,6 +464,8 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 		"pipeline":       outcome.pipeline,
 		"providers":      providerViews,
 		"status":         outcome.status,
+		"pinning_status": outcome.pinningStatus,
+		"canonical_slug": outcome.canonicalSlug,
 	}
 	if outcome.actualProvider != "" {
 		result["actual_provider"] = outcome.actualProvider
@@ -481,25 +483,33 @@ type providerProbeOutcome struct {
 	providers      []string
 	pipeline       string
 	actualProvider string
+	canonicalSlug  string
+	pinningStatus  string
 	err            error
 }
 
 // probeModelProviders keeps pipeline discovery and catalog discovery in one
 // path so the management probe and its tests cannot drift apart.
 func (s *Server) probeModelProviders(ctx context.Context, credential credentials.Record, model string, timeout time.Duration) providerProbeOutcome {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	identify := map[string]any{
-		"model":      model,
-		"messages":   []any{map[string]any{"role": "user", "content": "Reply with the word OK"}},
-		"max_tokens": 16,
+		"model":    model,
+		"messages": []any{map[string]any{"role": "user", "content": "Reply with the single word: ready"}},
+		// Cline Pass reasoning models can spend more than 16 tokens before
+		// emitting visible text. A too-small budget returns HTTP 500 empty
+		// content, preventing pipeline discovery even though the model works.
+		"max_tokens": 64,
 		"stream":     false,
 	}
-	status, body, err := s.chat(ctx, credential, identify, timeout)
+	status, body, err := s.routingProbeChat(ctx, credential, identify, timeout)
 	pipeline, actual := providerPipelineFromResponse(body)
-	outcome := providerProbeOutcome{status: status, pipeline: pipeline, actualProvider: actual, err: err}
+	outcome := providerProbeOutcome{status: status, pipeline: pipeline, actualProvider: actual, canonicalSlug: probeCanonicalSlug(body), pinningStatus: "probe_unavailable", err: err}
 	if err != nil {
 		return outcome
 	}
 	if pipeline == "" {
+		outcome.pinningStatus = "pipeline_unknown"
 		outcome.err = errors.New("Cline response did not identify a provider pipeline; provider pinning cannot be verified")
 		return outcome
 	}
@@ -515,7 +525,7 @@ func (s *Server) probeModelProviders(ctx context.Context, credential credentials
 	} else {
 		probe["provider"] = map[string]any{"only": []string{"__probe__"}}
 	}
-	catalogStatus, catalogBody, catalogErr := s.chat(ctx, credential, probe, timeout)
+	catalogStatus, catalogBody, catalogErr := s.routingProbeChat(ctx, credential, probe, timeout)
 	providers, catalogPipeline := providerProbeResults(catalogBody)
 	if catalogPipeline != "" && catalogPipeline != pipeline {
 		providers = nil
@@ -527,6 +537,12 @@ func (s *Server) probeModelProviders(ctx context.Context, credential credentials
 		// The invalid-provider request is expected to return an error status.
 		// A parsed, model-specific catalog is still a successful discovery.
 		outcome.err = nil
+		outcome.pinningStatus = "catalog_available"
+		return outcome
+	}
+	if catalogErr == nil && probeActualProvider(catalogBody) != "" {
+		outcome.pinningStatus = "routing_ignored"
+		outcome.err = errors.New("Cline ignored the invalid provider restriction and completed with another provider; this model currently does not honor provider pinning")
 		return outcome
 	}
 	outcome.err = catalogErr
@@ -536,15 +552,54 @@ func (s *Server) probeModelProviders(ctx context.Context, credential credentials
 	return outcome
 }
 
+// routingProbeChat uses the same small token budget for the known Cline
+// empty-content failure's SSE retry. It never changes the model or falls back
+// to a usage-billed catalog model.
+func (s *Server) routingProbeChat(ctx context.Context, credential credentials.Record, payload map[string]any, timeout time.Duration) (int, []byte, error) {
+	status, body, err := s.chat(ctx, credential, payload, timeout)
+	if !isEmptyContentError(status, err) {
+		return status, body, err
+	}
+	streaming := make(map[string]any, len(payload))
+	for key, value := range payload {
+		streaming[key] = value
+	}
+	streaming["stream"] = true
+	return s.chat(ctx, credential, streaming, timeout)
+}
+
+// probeCompletionObject unwraps blocking responses and aggregates only small
+// management probe SSE responses. Inference streams remain per-frame.
+func probeCompletionObject(body []byte) map[string]any {
+	if root, err := models.DecodeObject(unwrapCompletionEnvelope(body)); err == nil {
+		return root
+	}
+	decoder := upstream.NewSSEDecoder(strings.NewReader(string(body)), int64(len(body))+1)
+	aggregate := newCompletionAggregate()
+	for {
+		event, err := decoder.Next()
+		if err != nil {
+			return nil
+		}
+		if string(event.Data) == "[DONE]" {
+			raw, err := aggregate.result(models.String(aggregate.root["model"]), true)
+			if err != nil {
+				return nil
+			}
+			root, _ := models.DecodeObject(raw)
+			return root
+		}
+		if len(event.Data) > 0 && aggregate.observe(unwrapCompletionEnvelope(event.Data)) != nil {
+			return nil
+		}
+	}
+}
+
 // providerPipelineFromResponse classifies only response evidence. A provider
 // list from an error is not enough to classify a model because the list may
 // belong to a different gateway layer.
 func providerPipelineFromResponse(body []byte) (string, string) {
-	root := unwrapCompletionEnvelope(body)
-	object, err := models.DecodeObject(root)
-	if err != nil {
-		return "", ""
-	}
+	object := probeCompletionObject(body)
 	if provider, final := completionProvider(object); final {
 		return "planner", provider
 	}
@@ -552,6 +607,22 @@ func providerPipelineFromResponse(body []byte) (string, string) {
 		return "direct", provider
 	}
 	return "", ""
+}
+
+func probeCanonicalSlug(body []byte) string {
+	root := probeCompletionObject(body)
+	for _, choice := range models.List(root["choices"]) {
+		message := models.Object(models.Object(choice)["message"])
+		routing := models.Object(models.Object(models.Object(message["provider_metadata"])["gateway"])["routing"])
+		if slug := models.String(routing["canonicalSlug"]); slug != "" {
+			return slug
+		}
+	}
+	routing := models.Object(models.Object(models.Object(root["provider_metadata"])["gateway"])["routing"])
+	if slug := models.String(routing["canonicalSlug"]); slug != "" {
+		return slug
+	}
+	return models.String(root["model"])
 }
 
 func (s *Server) probeCredential(id string) (credentials.Record, bool) {
@@ -747,31 +818,7 @@ func parseProviderListMessage(message string) []string {
 }
 
 func probeActualProvider(body []byte) string {
-	if strings.Contains(string(body), "data:") {
-		for _, line := range strings.Split(string(body), "\n") {
-			line = strings.TrimSpace(line)
-			if !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			if payload == "" || payload == "[DONE]" {
-				continue
-			}
-			root, err := models.DecodeObject([]byte(payload))
-			if err != nil {
-				continue
-			}
-			if provider, _ := completionProvider(root); provider != "" {
-				return provider
-			}
-		}
-		return ""
-	}
-	root, err := models.DecodeObject(body)
-	if err != nil {
-		return ""
-	}
-	provider, _ := completionProvider(root)
+	provider, _ := completionProvider(probeCompletionObject(body))
 	return provider
 }
 
@@ -822,14 +869,23 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		"stream":     false,
 	}
 	applyProviderSelection(testPayload, entry.Providers, entry.ProviderPipeline)
-	status, body, err := s.chat(ctxOrBackground(r), credential, testPayload, time.Duration(settings.TimeoutSeconds)*time.Second)
+	status, body, err := s.routingProbeChat(ctxOrBackground(r), credential, testPayload, time.Duration(settings.TimeoutSeconds)*time.Second)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "latency_ms": latency, "error": credentials.Sanitize(err.Error())})
 		return
 	}
+	completion := probeCompletionObject(body)
+	if completion == nil || len(models.List(completion["choices"])) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "status": status, "latency_ms": latency, "error": "Cline did not return a complete completion"})
+		return
+	}
 	actualProvider := probeActualProvider(body)
 	if !providerAllowed(entry.Providers, actualProvider) {
+		message := fmt.Sprintf("configured provider selection was not honored: requested [%s], Cline selected %q", strings.Join(entry.Providers, ", "), actualProvider)
+		if actualProvider == "" {
+			message = "Cline did not report an actual provider; unable to verify the configured selection"
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"ok":              false,
 			"status":          status,
@@ -837,16 +893,12 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 			"model":           payload.Model,
 			"upstream_model":  upstreamModel,
 			"actual_provider": actualProvider,
-			"error":           fmt.Sprintf("configured provider selection was not honored: requested [%s], Cline selected %q", strings.Join(entry.Providers, ", "), actualProvider),
+			"error":           message,
 		})
 		return
 	}
-	reply := ""
-	if root, decodeErr := models.DecodeObject(body); decodeErr == nil {
-		if choices := models.List(root["choices"]); len(choices) > 0 {
-			reply = models.String(models.Object(models.Object(choices[0])["message"])["content"])
-		}
-	}
+	choices := models.List(completion["choices"])
+	reply := models.String(models.Object(models.Object(choices[0])["message"])["content"])
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                status >= 200 && status < 300,
 		"status":            status,

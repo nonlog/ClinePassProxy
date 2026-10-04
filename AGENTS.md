@@ -74,6 +74,14 @@ Each of these was a real defect found in review. They are invariants, not prefer
   Provider selections without a confirmed pipeline are stale and must be
   cleared during config load/update so they cannot make inference unusable.
   Parse Cline's embedded provider-error JSON before inspecting its fields.
+  Identify the real pipeline with an ordinary ClinePass request before probing
+  its catalog. Cline's string-valued `error` and `success/data` response wrapper
+  are part of the real contract. A successful invalid-provider request proves
+  the restriction was ignored, not that its actual provider is a catalog.
+  Distinguish routing ignored from transient probe errors in the UI. Model tests
+  must verify actual provider evidence too; an absent provider is not a verified
+  pin. Never switch a subscription model to a paid catalog model to make a pin
+  work. Editing a confirmed selection must not silently clear it.
 - **Management route parity.** Any management endpoint called by the console
   must also be advertised by `cpa-connector` and verified through the CPA origin.
   Deploy the Actions-built connector when its routes change, not only the proxy.

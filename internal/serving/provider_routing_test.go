@@ -20,7 +20,7 @@ func TestModelProviderSelectionPinsPlannerShape(t *testing.T) {
 			t.Fatalf("decode upstream request: %v", err)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"completion-1","model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+		_, _ = w.Write([]byte(`{"id":"completion-1","model":"cline-pass/deepseek-v4.1-flash","choices":[{"index":0,"message":{"role":"assistant","content":"ok","provider_metadata":{"gateway":{"routing":{"finalProvider":"runware"}}}},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
 	}))
 	defer cline.Close()
 
@@ -122,5 +122,29 @@ func TestModelTestUsesPipelineAndRejectsActualProviderMismatch(t *testing.T) {
 	}
 	if models.Bool(response["ok"]) || !strings.Contains(models.String(response["error"]), "not honored") {
 		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestPinnedStreamCannotCompleteWithoutActualProviderEvidence(t *testing.T) {
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ready\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+	}))
+	defer cline.Close()
+	server, handler := newTestServer(t, cline.URL)
+	settings := server.Config.Get()
+	settings.Models = []models.Entry{{ID: "m", UpstreamID: "cline-pass/m", Providers: []string{"runware"}, ProviderPipeline: "planner"}}
+	if _, err := server.Config.Update(settings); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if !strings.Contains(recorder.Body.String(), "unable to verify") || strings.Contains(recorder.Body.String(), "data: [DONE]") {
+		t.Fatalf("unverified pin silently completed: %s", recorder.Body.String())
+	}
+	if records := server.History.List(1, ""); len(records) == 0 || records[0].Status != http.StatusBadGateway {
+		t.Fatalf("unverified pin status = %#v", records)
 	}
 }

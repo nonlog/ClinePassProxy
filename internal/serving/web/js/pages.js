@@ -562,6 +562,7 @@
       }
 
       addProviderItems(entry && entry.observed_providers, "history");
+      addProviderItems(entry && entry.providers, "configured");
 
       var providerList = el("div", { class: "stack", style: "gap:4px" });
       var providerHint = el("span", { class: "hint", "aria-live": "polite", text: "当前模型尚未探测；历史命中不代表当前可路由。" });
@@ -628,7 +629,16 @@
               })
             });
             if (generation !== probeGeneration) return;
+            if (result && result.pinning_status === "routing_ignored") {
+              providerHint.className = "bad-text";
+              providerHint.textContent = "当前模型不支持固定 Provider：Cline 忽略了路由限制。" +
+                (result.actual_provider ? " 实际命中：" + result.actual_provider + "。" : "") +
+                (result.canonical_slug ? " 实际模型：" + result.canonical_slug + "。" : "") +
+                "不会使用历史 Provider 列表；不会切换到按量付费模型。";
+              return;
+            }
             if (!result || result.ok === false || result.error) throw new Error((result && result.error) || "上游没有返回可路由 Provider");
+            if (result.pipeline !== "planner" && result.pipeline !== "direct") throw new Error("上游没有确认当前模型的路由通道");
             // The probe catalog is authoritative for this exact model. Old
             // history entries must not remain selectable after the upstream
             // model or its routing pipeline changes.
@@ -645,7 +655,7 @@
             if (result && result.pipeline) details.push("通道：" + result.pipeline);
             if (result && result.actual_provider) details.push("最近命中：" + result.actual_provider);
             providerHint.className = "hint";
-          providerHint.textContent = "发现 " + count + " 个 Provider" + (details.length ? " · " + details.join(" · ") : "") + "；只有本次探测列出的 Provider 会保存。";
+            providerHint.textContent = "发现 " + count + " 个 Provider" + (details.length ? " · " + details.join(" · ") : "") + "；保存后测试会核对实际 Provider，不能把列出渠道当作固定成功。";
           } catch (error) {
             if (generation !== probeGeneration) return;
             providerHint.className = "bad-text";
@@ -729,6 +739,7 @@
           if (result.ok) {
             testResult.className = "ok-text";
             testResult.textContent = "成功 · " + fmt.ms(result.latency_ms) + " · 上游模型 " + (result.upstream_model || "") +
+              " · 实际 Provider：" + (result.provider || "未返回") +
               " · 回复：" + (result.reply || "(空)");
             ui.toast("模型测试通过（" + fmt.ms(result.latency_ms) + "）", "ok");
           } else {

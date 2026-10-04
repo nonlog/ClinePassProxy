@@ -136,17 +136,29 @@ alias exists, only listed IDs are accepted, which keeps the proxy fail-closed.
 When a model alias has `providers`, CPP sends the allow-list in the routing
 shape discovered for that exact upstream model: planner models use
 `providerOptions.gateway.only`, while direct OpenRouter models use
-`provider.only`. Before a probe has identified the pipeline, both shapes are
-sent for backward compatibility. The actual provider is read from Cline's
-response metadata; if it is outside the saved allow-list, CPP reports a
-provider-selection error instead of silently routing to another provider.
+`provider.only`. Saved selections without a confirmed pipeline are cleared as
+unverified legacy configuration. The actual provider is read from Cline's
+response metadata; if it is outside the saved allow-list or a completed pinned
+request has no provider evidence, CPP reports an error instead of claiming a
+successful pin. The same check applies to the Models page's test button.
 
-The Models page can discover the current provider catalog without generating a
-model response. It sends `POST /api/models/providers/probe` with a deliberately
-invalid `__probe__` provider, then presents only the providers returned by that
-model-specific catalog probe as a multi-select list. Historical request
-providers are informational and cannot be saved until a fresh probe confirms
-them. Leave the list empty for automatic routing.
+The Models page's `POST /api/models/providers/probe` first issues an ordinary
+64-token completion to identify the actual pipeline and canonical model. It
+then sends a 16-token request with the pipeline-specific invalid `__probe__`
+provider to obtain the model's catalog. The ordinary request consumes a small
+amount of ClinePass quota. Cline's known `empty response content` error retries
+as SSE without raising the token budget or changing the model. Only the returned
+model-specific catalog is selectable; history is informational. Editing a
+previously confirmed selection preserves it. Leave the list empty for automatic
+routing.
+
+`pinning_status` distinguishes `catalog_available`, `routing_ignored`,
+`pipeline_unknown` and `probe_unavailable`. If an invalid provider request
+completes with another provider, Cline is ignoring the restriction and the UI
+shows that the current model cannot be pinned. It does not invent a catalog,
+silently accept another provider, or switch to a usage-billed model. Pipeline
+and catalog support can change at Cline; a catalog alone is not a successful
+pin. Validate a saved selection with a real request and its actual provider.
 
 ## Session affinity
 
