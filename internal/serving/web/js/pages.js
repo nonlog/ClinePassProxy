@@ -540,6 +540,7 @@
       var upstreamInput = el("input", { value: entry ? entry.upstream_id || "" : "", placeholder: "上游模型 ID（留空 = 同名）" });
       var selectedProviders = Object.create(null);
       var providerOptions = Object.create(null);
+      var providerPipeline = entry && entry.provider_pipeline || "";
       var probeGeneration = 0;
       (entry && entry.providers || []).forEach(function (name) {
         if (typeof name === "string" && name.trim()) selectedProviders[name.trim()] = true;
@@ -583,13 +584,14 @@
         }
         names.forEach(function (name) {
           var option = providerOptions[name] || { source: "configured" };
-          var checkbox = el("input", { type: "checkbox", checked: Boolean(selectedProviders[name]) });
+          var confirmed = option.source === "probe" || (option.source === "configured" && Boolean(providerPipeline));
+          var checkbox = el("input", { type: "checkbox", checked: Boolean(selectedProviders[name]), disabled: !confirmed });
           checkbox.addEventListener("change", function () {
             if (checkbox.checked) selectedProviders[name] = true;
             else delete selectedProviders[name];
           });
-          var status = option.source === "history" ? "历史命中 · 当前未确认" : option.source === "configured"
-            ? "已选 · 未确认" : statusLabel(option.status || "available");
+          var status = option.source === "history" ? "历史命中 · 当前未确认" : option.source === "configured" && !providerPipeline
+            ? "已保存 · 当前未确认" : option.source === "configured" ? "已确认 · " + providerPipeline : statusLabel(option.status || "available");
           providerList.appendChild(el("label", { class: "field inline" }, [
             checkbox,
             el("span", { class: "mono", text: name }),
@@ -601,6 +603,7 @@
       function invalidateProviders() {
         probeGeneration++;
         providerOptions = Object.create(null);
+        providerPipeline = "";
         renderProviderChoices();
         providerHint.className = "hint";
         providerHint.textContent = "当前模型尚未探测；已选 Provider 未确认。";
@@ -626,15 +629,23 @@
             });
             if (generation !== probeGeneration) return;
             if (!result || result.ok === false || result.error) throw new Error((result && result.error) || "上游没有返回可路由 Provider");
+            // The probe catalog is authoritative for this exact model. Old
+            // history entries must not remain selectable after the upstream
+            // model or its routing pipeline changes.
+            providerOptions = Object.create(null);
             addProviderItems(result.providers, "probe");
             var count = Object.keys(providerOptions).length;
             if (!count) throw new Error("上游没有返回可路由 Provider");
+            Object.keys(selectedProviders).forEach(function (name) {
+              if (!providerOptions[name]) delete selectedProviders[name];
+            });
+            providerPipeline = result.pipeline === "planner" || result.pipeline === "direct" ? result.pipeline : "";
             renderProviderChoices();
             var details = [];
             if (result && result.pipeline) details.push("通道：" + result.pipeline);
             if (result && result.actual_provider) details.push("最近命中：" + result.actual_provider);
             providerHint.className = "hint";
-            providerHint.textContent = "发现 " + count + " 个 Provider" + (details.length ? " · " + details.join(" · ") : "");
+          providerHint.textContent = "发现 " + count + " 个 Provider" + (details.length ? " · " + details.join(" · ") : "") + "；只有本次探测列出的 Provider 会保存。";
           } catch (error) {
             if (generation !== probeGeneration) return;
             providerHint.className = "bad-text";
@@ -660,12 +671,17 @@
         var id = idInput.value.trim();
         if (!id) { ui.toast("模型 ID 不能为空", "bad"); return; }
         var next = list.filter(function (item) { return item.id !== (entry ? entry.id : id); }).map(function (item) {
-          return { id: item.id, upstream_id: item.upstream_id, providers: item.providers || [], disabled: Boolean(item.disabled) };
+          return { id: item.id, upstream_id: item.upstream_id, providers: item.providers || [], provider_pipeline: item.provider_pipeline || "", disabled: Boolean(item.disabled) };
         });
         next.push({
           id: id,
           upstream_id: upstreamInput.value.trim(),
-          providers: Object.keys(selectedProviders).filter(function (name) { return selectedProviders[name]; }),
+          providers: Object.keys(selectedProviders).filter(function (name) {
+            if (!selectedProviders[name]) return false;
+            var option = providerOptions[name];
+            return option && (option.source === "probe" || (option.source === "configured" && Boolean(providerPipeline)));
+          }),
+          provider_pipeline: providerPipeline,
           disabled: disabledInput.checked
         });
         close();
@@ -752,7 +768,7 @@
                 el("button", { class: "btn small danger", type: "button", onclick: function () {
                   if (!ui.confirm("删除别名 " + row.entry.id + "？")) return;
                   save(list.filter(function (item) { return item.id !== row.entry.id; }).map(function (item) {
-                    return { id: item.id, upstream_id: item.upstream_id, providers: item.providers || [], disabled: Boolean(item.disabled) };
+                    return { id: item.id, upstream_id: item.upstream_id, providers: item.providers || [], provider_pipeline: item.provider_pipeline || "", disabled: Boolean(item.disabled) };
                   }), function () {});
                 } }, "删除")
               ]);

@@ -108,34 +108,34 @@ test("HTTP probe failure and empty catalog cannot reuse historical provider coun
   }
 });
 
-test("successful probes replace catalog, preserving saved selections as unconfirmed", async () => {
+test("successful probes replace catalog and discard unconfirmed saved selections", async () => {
   const results = [
     { ok: true, providers: [{ name: "runware", status: "available" }] },
     { ok: true, providers: [{ name: "alibaba", status: "available" }] }
   ];
   const form = await modelForm({ probe: async () => results.shift() });
   await form.click("探测 Provider");
-  assert.deepEqual(form.names(), ["runware", "saved"]);
+  assert.deepEqual(form.names(), ["runware"]);
   assert.match(form.modal.textContent, /发现 1 个 Provider/);
   assert.match(form.choices()[0].textContent, /上游列出/);
   await form.click("探测 Provider");
-  assert.deepEqual(form.names(), ["alibaba", "saved"]);
+  assert.deepEqual(form.names(), ["alibaba"]);
   await form.click("全选");
   await form.click("保存");
-  assert.deepEqual(form.saved()[0].providers.sort(), ["alibaba", "saved"]);
+  assert.deepEqual(form.saved()[0].providers.sort(), ["alibaba"]);
 });
 
-test("changing model inputs clears stale choices without deleting selected provider config", async () => {
+test("changing model inputs clears stale choices and unconfirmed selections", async () => {
   const form = await modelForm({ probe: async () => ({ ok: true, providers: ["runware"] }) });
   await form.click("探测 Provider");
   const inputs = nodes(form.modal, node => node.tag === "input" && !node.attributes.type);
   inputs[1].value = "cline-pass/deepseek-v4.1-flash";
   inputs[1].emit("input");
-  assert.deepEqual(form.names(), ["saved"]);
+  assert.deepEqual(form.names(), []);
   assert.equal(form.button("全选").disabled, true);
   await form.click("全选");
   await form.click("保存");
-  assert.deepEqual(form.saved()[0].providers, ["saved"]);
+  assert.deepEqual(form.saved()[0].providers, []);
 });
 
 test("late probe response cannot repopulate a different model's choices", async () => {

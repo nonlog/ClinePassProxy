@@ -53,3 +53,34 @@ func TestModelProviderSelectionPinsBothClineRoutingShapes(t *testing.T) {
 		t.Fatalf("provider.only = %v", provider["only"])
 	}
 }
+
+func TestModelProviderSelectionRejectsSilentFallback(t *testing.T) {
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"provider_metadata\":{\"gateway\":{\"routing\":{\"finalProvider\":\"openai-compatible-private\"}}}}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer cline.Close()
+
+	server, handler := newTestServer(t, cline.URL)
+	settings := server.Config.Get()
+	settings.Models = []models.Entry{{ID: "m", UpstreamID: "cline-pass/m", Providers: []string{"alibaba"}, ProviderPipeline: "planner"}}
+	if _, err := server.Config.Update(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}`))
+	request.Header.Set("Authorization", "Bearer gateway-key")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("stream provider fallback returned status %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), "configured provider selection was not honored") {
+		t.Fatalf("provider mismatch was not surfaced: %s", recorder.Body.String())
+	}
+	if got := server.History.List(1, "")[0].Provider; got != "openai-compatible-private" {
+		t.Fatalf("actual provider was not recorded: %q", got)
+	}
+}

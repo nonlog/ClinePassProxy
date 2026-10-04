@@ -146,6 +146,10 @@ func (c *Config) Validate() error {
 		entry.ID = strings.TrimSpace(entry.ID)
 		entry.UpstreamID = strings.TrimSpace(entry.UpstreamID)
 		entry.Providers = compactStrings(entry.Providers)
+		entry.ProviderPipeline = strings.ToLower(strings.TrimSpace(entry.ProviderPipeline))
+		if entry.ProviderPipeline != "" && entry.ProviderPipeline != "planner" && entry.ProviderPipeline != "direct" {
+			return fmt.Errorf("model %q has invalid provider_pipeline", entry.ID)
+		}
 		if entry.ID == "" || seen[entry.ID] {
 			return errors.New("model ids must be nonempty and unique")
 		}

@@ -385,6 +385,7 @@ func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 			"id":                 entry.ID,
 			"upstream_id":        entry.UpstreamID,
 			"providers":          entry.Providers,
+			"provider_pipeline":  entry.ProviderPipeline,
 			"observed_providers": modelObservedProviders,
 			"disabled":           entry.Disabled,
 			"suggested":          defaultTestModel(settings) == entry.ID,
@@ -459,10 +460,13 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 	var detectedPipeline string
 	for _, pipeline := range []string{"planner", "direct"} {
 		probe := map[string]any{
-			"model":      upstreamModel,
-			"messages":   []any{map[string]any{"role": "user", "content": "provider probe"}},
-			"max_tokens": 1,
+			"model":    upstreamModel,
+			"messages": []any{map[string]any{"role": "user", "content": "provider probe"}},
+			// The invalid provider is intended to make Cline return its
+			// provider catalog without generating a response. Keep the same
+			// budget used by the reference switcher.
 			"stream":     false,
+			"max_tokens": 16,
 		}
 		if pipeline == "planner" {
 			probe["providerOptions"] = map[string]any{"gateway": map[string]any{"only": []string{"__probe__"}}}
@@ -471,7 +475,7 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 		}
 		status, body, err = s.chat(ctxOrBackground(r), credential, probe, probeTimeout)
 		providers, detectedPipeline = providerProbeResults(body)
-		if len(providers) > 0 {
+		if len(providers) > 0 || detectedPipeline != "" {
 			break
 		}
 	}
@@ -516,6 +520,57 @@ func (s *Server) probeCredential(id string) (credentials.Record, bool) {
 }
 
 func providerProbeResults(body []byte) ([]string, string) {
+	if strings.Contains(string(body), "data:") {
+		seen := map[string]bool{}
+		providers := make([]string, 0)
+		pipeline := ""
+		add := func(provider string) {
+			provider = strings.TrimSpace(provider)
+			if provider != "" && !seen[provider] {
+				seen[provider] = true
+				providers = append(providers, provider)
+			}
+		}
+		for _, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			root, err := models.DecodeObject([]byte(payload))
+			if err != nil {
+				continue
+			}
+			encoded, encodeErr := json.Marshal(root)
+			if encodeErr != nil {
+				continue
+			}
+			available, detected := providerProbeResultsJSON(encoded)
+			for _, provider := range available {
+				add(provider)
+			}
+			if pipeline == "" && detected != "" {
+				pipeline = detected
+			}
+			// A successful probe can expose the provider that Cline actually
+			// chose, but that is not a provider catalog. Only an upstream error
+			// listing available providers is safe to save as selectable data.
+			if provider, final := completionProvider(root); final && pipeline == "" {
+				_ = provider
+				pipeline = "planner"
+			} else if provider != "" && pipeline == "" {
+				pipeline = "direct"
+			}
+		}
+		return providers, pipeline
+	}
+	return providerProbeResultsJSON(body)
+}
+
+func providerProbeResultsJSON(body []byte) ([]string, string) {
 	root, err := models.DecodeObject(body)
 	if err != nil {
 		return parseProviderListMessage(string(body)), ""
@@ -645,6 +700,26 @@ func parseProviderListMessage(message string) []string {
 }
 
 func probeActualProvider(body []byte) string {
+	if strings.Contains(string(body), "data:") {
+		for _, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			root, err := models.DecodeObject([]byte(payload))
+			if err != nil {
+				continue
+			}
+			if provider, _ := completionProvider(root); provider != "" {
+				return provider
+			}
+		}
+		return ""
+	}
 	root, err := models.DecodeObject(body)
 	if err != nil {
 		return ""
@@ -875,7 +950,11 @@ func (s *Server) chat(ctx context.Context, record credentials.Record, payload ma
 	if err != nil {
 		return 0, nil, err
 	}
-	stream, err := s.upstream.ChatCompletions(ctx, record, upstream.ChatRequest{Body: body, Timeout: timeout})
+	stream, err := s.upstream.ChatCompletions(ctx, record, upstream.ChatRequest{
+		Body:    body,
+		Stream:  models.Bool(payload["stream"]),
+		Timeout: timeout,
+	})
 	if err != nil {
 		return 0, nil, err
 	}

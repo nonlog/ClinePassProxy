@@ -62,10 +62,11 @@ Each of these was a real defect found in review. They are invariants, not prefer
 - **Connector panel.** The browser only ever talks to CPA. The connector serves the
   console and forwards its API calls server-to-server, so the management token stays
   server-side and the in-network proxy address never has to resolve from a browser.
-- **Provider pinning.** A model alias's `providers` list is an allow-list: inject it
-  as both `provider.only` and `providerOptions.gateway.only` because Cline Pass
-  planner and direct pipelines consume different shapes. One value is a strict pin;
-  the actual provider remains response metadata, not a guessed request value.
+- **Provider pinning.** A model alias's `providers` list is an allow-list. Use the
+  model-specific probed pipeline: planner uses `providerOptions.gateway.only`,
+  direct uses `provider.only`, and an unknown pipeline may receive both shapes.
+  The actual provider comes from response metadata. If it is outside the saved
+  allow-list, surface an error instead of silently accepting a fallback.
 - **Provider discovery.** Catalogs belong to the specific upstream model being
   probed. Never use aggregate request-history providers as a model's catalog.
   History entries and saved selections are unconfirmed until an upstream probe

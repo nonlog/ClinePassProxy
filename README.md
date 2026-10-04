@@ -133,17 +133,20 @@ requests use `/v1/alpha/search`; Claude Code native `web_search_*` requests use
 An empty alias table means model IDs pass through to Cline unchanged. Once any
 alias exists, only listed IDs are accepted, which keeps the proxy fail-closed.
 
-When a model alias has `providers`, CPP pins the request to that allow-list by
-adding both `provider.only` and `providerOptions.gateway.only`. Cline Pass uses
-the latter for its planner path and the former for its direct OpenRouter path;
-one provider gives a strict pin, while multiple providers allow any listed
-provider. The actual selected provider is still taken from Cline's response
-metadata and shown in request history.
+When a model alias has `providers`, CPP sends the allow-list in the routing
+shape discovered for that exact upstream model: planner models use
+`providerOptions.gateway.only`, while direct OpenRouter models use
+`provider.only`. Before a probe has identified the pipeline, both shapes are
+sent for backward compatibility. The actual provider is read from Cline's
+response metadata; if it is outside the saved allow-list, CPP reports a
+provider-selection error instead of silently routing to another provider.
 
 The Models page can discover the current provider catalog without generating a
 model response. It sends `POST /api/models/providers/probe` with a deliberately
-invalid `__probe__` provider, then presents the returned providers as a
-multi-select list. Leave the list empty for automatic routing.
+invalid `__probe__` provider, then presents only the providers returned by that
+model-specific catalog probe as a multi-select list. Historical request
+providers are informational and cannot be saved until a fresh probe confirms
+them. Leave the list empty for automatic routing.
 
 ## Session affinity
 

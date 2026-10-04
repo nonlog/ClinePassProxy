@@ -120,8 +120,35 @@ func (s *Server) handleAlphaSearch(w http.ResponseWriter, r *http.Request) {
 // OpenRouter models consume provider.only. Unknown pipelines receive both
 // shapes, matching the proven switcher behavior without changing requests
 // whose model alias has no provider selection.
-func applyProviderSelection(payload map[string]any, providers []string) {
+func applyProviderSelection(payload map[string]any, providers []string, pipeline ...string) {
 	if len(providers) == 0 {
+		return
+	}
+	selectedPipeline := ""
+	if len(pipeline) > 0 {
+		selectedPipeline = strings.ToLower(strings.TrimSpace(pipeline[0]))
+	}
+	if selectedPipeline == "planner" {
+		providerOptions := models.Object(payload["providerOptions"])
+		if providerOptions == nil {
+			providerOptions = map[string]any{}
+		}
+		gateway := models.Object(providerOptions["gateway"])
+		if gateway == nil {
+			gateway = map[string]any{}
+		}
+		gateway["only"] = append([]string{}, providers...)
+		providerOptions["gateway"] = gateway
+		payload["providerOptions"] = providerOptions
+		return
+	}
+	if selectedPipeline == "direct" {
+		provider := models.Object(payload["provider"])
+		if provider == nil {
+			provider = map[string]any{}
+		}
+		provider["only"] = append([]string{}, providers...)
+		payload["provider"] = provider
 		return
 	}
 	only := append([]string{}, providers...)
@@ -145,13 +172,51 @@ func applyProviderSelection(payload map[string]any, providers []string) {
 	payload["provider"] = provider
 }
 
+// providerSelectionMismatch detects a Cline route that ignored the configured
+// provider allow-list. Cline can silently fall back for virtual models, which
+// is worse than returning an error because it makes the console claim that a
+// request was pinned when it was not.
+func providerSelectionMismatch(request *requestContext) error {
+	if request == nil || len(request.providers) == 0 {
+		return nil
+	}
+	actual := strings.TrimSpace(request.tracker.Record().Provider)
+	if actual == "" {
+		return nil
+	}
+	for _, allowed := range request.providers {
+		if providerKey(allowed) == providerKey(actual) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: requested [%s], Cline selected %q", errProviderSelection, strings.Join(request.providers, ", "), actual)
+}
+
+func providerKey(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var out strings.Builder
+	lastDash := false
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			out.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if out.Len() > 0 && !lastDash {
+			out.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.Trim(out.String(), "-")
+}
+
 // serveMessages converts Anthropic Messages to Cline Chat Completions and back.
 func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *requestContext, credential credentials.Record, timeout time.Duration) (int, error, bool) {
 	payload, err := translate.ClaudeMessagesToChatCompletions(request.raw, request.upstream, models.Bool(request.body["stream"]))
 	if err != nil {
 		return http.StatusBadRequest, err, false
 	}
-	applyProviderSelection(payload, request.providers)
+	applyProviderSelection(payload, request.providers, request.providerPipeline)
 	request.tracker.Stage(admin.StageTranslateDone)
 
 	streaming := models.Bool(request.body["stream"])
@@ -161,6 +226,9 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 			return status, err, retryable
 		}
 		s.observeChunk(request, raw)
+		if err := providerSelectionMismatch(request); err != nil {
+			return http.StatusBadGateway, err, false
+		}
 		converted, err := translate.OpenAICompletionToClaude(raw, request.model, request.raw)
 		if err != nil {
 			return http.StatusBadGateway, err, false
@@ -204,8 +272,8 @@ func (s *Server) serveMessages(w http.ResponseWriter, r *http.Request, request *
 		func() ([][]byte, error) { return converter.Done() },
 	)
 	if err != nil {
-		if isTruncatedStream(err) {
-			_ = writer.write(request.tracker, [][]byte{converter.ErrorFrame(truncationMessage(err))})
+		if isTruncatedStream(err) || errors.Is(err, errProviderSelection) {
+			_ = writer.write(request.tracker, [][]byte{converter.ErrorFrame(streamFailureMessage(err))})
 		}
 		return s.finishStreamFailure(request, err)
 	}
@@ -220,7 +288,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 	if err != nil {
 		return http.StatusBadRequest, err, false
 	}
-	applyProviderSelection(payload, request.providers)
+	applyProviderSelection(payload, request.providers, request.providerPipeline)
 	request.tracker.Stage(admin.StageTranslateDone)
 
 	translated, _ := jsonBytes(payload)
@@ -231,6 +299,9 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 			return status, err, retryable
 		}
 		s.observeChunk(request, raw)
+		if err := providerSelectionMismatch(request); err != nil {
+			return http.StatusBadGateway, err, false
+		}
 		converted, err := translate.OpenAICompletionToResponses(raw, request.model, request.raw, translated)
 		if err != nil {
 			return http.StatusBadGateway, err, false
@@ -274,8 +345,8 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 		func() ([][]byte, error) { return converter.Done() },
 	)
 	if err != nil {
-		if isTruncatedStream(err) {
-			_ = writer.write(request.tracker, [][]byte{converter.ErrorFrame(truncationMessage(err))})
+		if isTruncatedStream(err) || errors.Is(err, errProviderSelection) {
+			_ = writer.write(request.tracker, [][]byte{converter.ErrorFrame(streamFailureMessage(err))})
 		}
 		return s.finishStreamFailure(request, err)
 	}
@@ -296,7 +367,7 @@ func (s *Server) serveResponses(w http.ResponseWriter, r *http.Request, request 
 func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, request *requestContext, credential credentials.Record, timeout time.Duration) (int, error, bool) {
 	payload := translate.CloneMap(request.body)
 	payload["model"] = request.upstream
-	applyProviderSelection(payload, request.providers)
+	applyProviderSelection(payload, request.providers, request.providerPipeline)
 	stream := models.Bool(request.body["stream"])
 	request.tracker.Stage(admin.StageTranslateDone)
 
@@ -306,6 +377,9 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 			return status, err, retryable
 		}
 		s.observeChunk(request, raw)
+		if err := providerSelectionMismatch(request); err != nil {
+			return http.StatusBadGateway, err, false
+		}
 		s.finishRequest(request, http.StatusOK, nil)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -343,7 +417,7 @@ func (s *Server) serveChatCompletions(w http.ResponseWriter, r *http.Request, re
 		if isTruncatedStream(err) || errors.Is(err, errClientGone) {
 			// Nothing to add: the client is already gone.
 		} else {
-			_ = writer.write(request.tracker, [][]byte{translate.ChatStreamError(truncationMessage(err))})
+			_ = writer.write(request.tracker, [][]byte{translate.ChatStreamError(streamFailureMessage(err))})
 		}
 		return s.finishStreamFailure(request, err)
 	}
@@ -396,6 +470,13 @@ func truncationMessage(err error) string {
 	return "Cline upstream stream ended before the response completed"
 }
 
+func streamFailureMessage(err error) string {
+	if errors.Is(err, errProviderSelection) {
+		return err.Error()
+	}
+	return truncationMessage(err)
+}
+
 // chatChunkFinished reports whether an upstream chunk carried a finish reason.
 func chatChunkFinished(raw []byte) bool {
 	root, err := models.DecodeObject(raw)
@@ -412,6 +493,8 @@ func chatChunkFinished(raw []byte) bool {
 
 // errClientGone reports a downstream write that failed.
 var errClientGone = errors.New("client disconnected")
+
+var errProviderSelection = errors.New("configured provider selection was not honored")
 
 // sseWriter tracks the first downstream write and flushes every frame.
 type sseWriter struct {

@@ -12,7 +12,11 @@ type Entry struct {
 	ID         string   `json:"id" yaml:"id"`
 	UpstreamID string   `json:"upstream_id" yaml:"upstream_id"`
 	Providers  []string `json:"providers,omitempty" yaml:"providers,omitempty"`
-	Disabled   bool     `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	// ProviderPipeline records the Cline routing shape discovered by the last
+	// successful provider probe. Empty keeps the backward-compatible behavior
+	// of sending both routing shapes.
+	ProviderPipeline string `json:"provider_pipeline,omitempty" yaml:"provider_pipeline,omitempty"`
+	Disabled         bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
 }
 
 // Table resolves client-facing model IDs to upstream model IDs.

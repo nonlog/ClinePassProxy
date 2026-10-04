@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/nonlog/ClinePassProxy/internal/models"
 )
 
 func TestProviderProbeResults(t *testing.T) {
@@ -59,6 +61,17 @@ func TestProviderProbeResults(t *testing.T) {
 	}
 }
 
+func TestProviderProbeResultsReadsStreamingFinalProvider(t *testing.T) {
+	body := []byte("data: {\"choices\":[{\"delta\":{\"provider_metadata\":{\"gateway\":{\"routing\":{\"finalProvider\":\"alibaba\"}}}}}]}\n\ndata: [DONE]\n\n")
+	providers, pipeline := providerProbeResults(body)
+	if pipeline != "planner" {
+		t.Fatalf("pipeline = %q, want planner", pipeline)
+	}
+	if len(providers) != 0 {
+		t.Fatalf("successful stream provider must not be treated as a catalog: %#v", providers)
+	}
+}
+
 func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
 	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
@@ -72,6 +85,9 @@ func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
 		}
 		if body["provider"] != nil {
 			t.Errorf("planner probe unexpectedly sent provider.only: %#v", body["provider"])
+		}
+		if models.Bool(body["stream"]) || models.Number(body["max_tokens"]) != 16 {
+			t.Errorf("probe budget/stream = %#v/%#v", body["max_tokens"], body["stream"])
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

@@ -192,15 +192,16 @@ func matchesAnyKey(candidate string, keys []string) bool {
 
 // requestContext holds the parsed request shared by every protocol handler.
 type requestContext struct {
-	raw       []byte
-	body      map[string]any
-	tracker   *admin.Tracker
-	trail     *trail
-	model     string
-	upstream  string
-	providers []string
-	sessionID string
-	sessionBy string
+	raw              []byte
+	body             map[string]any
+	tracker          *admin.Tracker
+	trail            *trail
+	model            string
+	upstream         string
+	providers        []string
+	providerPipeline string
+	sessionID        string
+	sessionBy        string
 	// streamed records that SSE headers and at least the protocol prologue have
 	// already been written, so a later failure must not append a JSON error body
 	// to the open event stream.
@@ -273,15 +274,16 @@ func (s *Server) readRequest(w http.ResponseWriter, r *http.Request, sourceForma
 	record.UpstreamMode = upstreamModel
 
 	return &requestContext{
-		raw:       raw,
-		body:      body,
-		tracker:   tracker,
-		trail:     &trail{},
-		model:     record.Model,
-		upstream:  upstreamModel,
-		providers: append([]string{}, entry.Providers...),
-		sessionID: sessionID,
-		sessionBy: sessionBy,
+		raw:              raw,
+		body:             body,
+		tracker:          tracker,
+		trail:            &trail{},
+		model:            record.Model,
+		upstream:         upstreamModel,
+		providers:        append([]string{}, entry.Providers...),
+		providerPipeline: strings.ToLower(strings.TrimSpace(entry.ProviderPipeline)),
+		sessionID:        sessionID,
+		sessionBy:        sessionBy,
 	}, true
 }
 
@@ -363,6 +365,9 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request, request *reque
 		}
 		lastErr, lastStatus = err, status
 		request.trail.add(fmt.Sprintf("%s -> HTTP %d: %s", credential.Label, status, credentials.Sanitize(err.Error())))
+		if errors.Is(err, errProviderSelection) {
+			break
+		}
 		s.recordCredentialFailure(credential.ID, status, err)
 		if !retryable || attempt == settings.RetryFailover {
 			break
@@ -502,6 +507,9 @@ func (s *Server) consumeUpstream(r *http.Request, request *requestContext, strea
 		}
 		chunk := unwrapCompletionEnvelope([]byte(payload))
 		s.observeChunk(request, chunk)
+		if err := providerSelectionMismatch(request); err != nil {
+			return sawDone, err
+		}
 		frames, err := emit(chunk)
 		if err != nil {
 			return sawDone, err
