@@ -71,6 +71,8 @@ Each of these was a real defect found in review. They are invariants, not prefer
   probed. Never use aggregate request-history providers as a model's catalog.
   History entries and saved selections are unconfirmed until an upstream probe
   lists them; a failed probe stays a failure even when history is nonempty.
+  Provider selections without a confirmed pipeline are stale and must be
+  cleared during config load/update so they cannot make inference unusable.
   Parse Cline's embedded provider-error JSON before inspecting its fields.
 - **Management route parity.** Any management endpoint called by the console
   must also be advertised by `cpa-connector` and verified through the CPA origin.

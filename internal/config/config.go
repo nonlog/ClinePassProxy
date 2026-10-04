@@ -290,6 +290,17 @@ func normalize(cfg Config) Config {
 	if cfg.RequestLogBodyBytes == 0 {
 		cfg.RequestLogBodyBytes = Defaults().RequestLogBodyBytes
 	}
+	for i := range cfg.Models {
+		entry := &cfg.Models[i]
+		entry.ProviderPipeline = strings.ToLower(strings.TrimSpace(entry.ProviderPipeline))
+		entry.Providers = compactStrings(entry.Providers)
+		// Provider names from request history or pre-pipeline versions are not
+		// proof that this model can route to them. Drop those stale selections
+		// during load/update so an old config cannot make inference unusable.
+		if entry.ProviderPipeline == "" && len(entry.Providers) > 0 {
+			entry.Providers = nil
+		}
+	}
 	return cfg
 }
 

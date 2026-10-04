@@ -10,7 +10,7 @@ import (
 	"github.com/nonlog/ClinePassProxy/internal/models"
 )
 
-func TestModelProviderSelectionPinsBothClineRoutingShapes(t *testing.T) {
+func TestModelProviderSelectionPinsPlannerShape(t *testing.T) {
 	var upstreamBody map[string]any
 	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/chat/completions" {
@@ -27,9 +27,10 @@ func TestModelProviderSelectionPinsBothClineRoutingShapes(t *testing.T) {
 	server, handler := newTestServer(t, cline.URL)
 	settings := server.Config.Get()
 	settings.Models = []models.Entry{{
-		ID:         "deepseek-v4.1-flash",
-		UpstreamID: "cline-pass/deepseek-v4.1-flash",
-		Providers:  []string{"runware"},
+		ID:               "deepseek-v4.1-flash",
+		UpstreamID:       "cline-pass/deepseek-v4.1-flash",
+		Providers:        []string{"runware"},
+		ProviderPipeline: "planner",
 	}}
 	if _, err := server.Config.Update(settings); err != nil {
 		t.Fatal(err)
@@ -48,9 +49,8 @@ func TestModelProviderSelectionPinsBothClineRoutingShapes(t *testing.T) {
 	if got := models.List(gateway["only"]); len(got) != 1 || models.String(got[0]) != "runware" {
 		t.Fatalf("providerOptions.gateway.only = %v", gateway["only"])
 	}
-	provider := models.Object(upstreamBody["provider"])
-	if got := models.List(provider["only"]); len(got) != 1 || models.String(got[0]) != "runware" {
-		t.Fatalf("provider.only = %v", provider["only"])
+	if upstreamBody["provider"] != nil {
+		t.Fatalf("planner request unexpectedly sent direct provider shape: %#v", upstreamBody["provider"])
 	}
 }
 
