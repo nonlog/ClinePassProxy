@@ -73,10 +73,20 @@ func TestProviderProbeResultsReadsStreamingFinalProvider(t *testing.T) {
 }
 
 func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
+	calls := 0
 	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Errorf("decode probe: %v", err)
+			return
+		}
+		if calls == 1 {
+			if body["provider"] != nil || body["providerOptions"] != nil {
+				t.Errorf("pipeline identification unexpectedly sent provider fields: %#v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"provider_metadata":{"gateway":{"routing":{"finalProvider":"alibaba"}}}}}]}`))
 			return
 		}
 		gateway := modelsObject(modelsObject(body["providerOptions"])["gateway"])
@@ -114,7 +124,7 @@ func TestProbeModelProvidersSendsPlannerShape(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if !response.OK || response.Status != http.StatusBadRequest || len(response.Providers) != 2 || response.Providers[0].Name != "alibaba" {
+	if calls != 2 || !response.OK || response.Status != http.StatusBadRequest || len(response.Providers) != 2 || response.Providers[0].Name != "alibaba" {
 		t.Fatalf("probe response = %#v", response)
 	}
 }
@@ -129,12 +139,15 @@ func TestProbeModelProvidersFallsBackToDirectShape(t *testing.T) {
 			return
 		}
 		if calls == 1 {
-			if body["provider"] != nil {
-				t.Errorf("planner probe sent provider.only: %#v", body["provider"])
+			if body["provider"] != nil || body["providerOptions"] != nil {
+				t.Errorf("pipeline identification unexpectedly sent provider fields: %#v", body)
 			}
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte(`{"error":"no provider catalog"}`))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"provider":"GMICloud","model":"deepseek/deepseek-v4.1-flash","choices":[{"message":{"content":"OK"}}]}`))
 			return
+		}
+		if body["providerOptions"] != nil {
+			t.Errorf("direct probe sent planner providerOptions: %#v", body["providerOptions"])
 		}
 		provider := modelsObject(body["provider"])
 		if got := stringList(provider["only"]); len(got) != 1 || got[0] != "__probe__" {
@@ -165,6 +178,40 @@ func TestProbeModelProvidersFallsBackToDirectShape(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Pipeline != "direct" || len(response.Providers) != 1 || response.Providers[0].Name != "runware" {
+		t.Fatalf("probe response = %#v", response)
+	}
+}
+
+func TestProbeModelProvidersDoesNotGuessPipelineWhenOrdinaryResponseHasNoProvider(t *testing.T) {
+	calls := 0
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"OK"}}]}`))
+	}))
+	defer cline.Close()
+
+	_, handler := newTestServer(t, cline.URL)
+	req := httptest.NewRequest(http.MethodPost, "/api/models/providers/probe", strings.NewReader(`{"model":"cline-pass/demo","upstream_model":"deepseek-v4.1-flash"}`))
+	req.Header.Set("Authorization", "Bearer management-token")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK || calls != 1 {
+		t.Fatalf("status = %d, calls = %d, body = %s", recorder.Code, calls, recorder.Body.String())
+	}
+	var response struct {
+		OK        bool   `json:"ok"`
+		Pipeline  string `json:"pipeline"`
+		Error     string `json:"error"`
+		Providers []struct {
+			Name string `json:"name"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.OK || response.Pipeline != "" || len(response.Providers) != 0 || !strings.Contains(response.Error, "pipeline") {
 		t.Fatalf("probe response = %#v", response)
 	}
 }

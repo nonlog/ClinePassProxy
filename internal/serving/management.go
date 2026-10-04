@@ -407,10 +407,11 @@ type providerProbePayload struct {
 	Pipeline      string `json:"pipeline"`
 }
 
-// handleProbeModelProviders asks Cline for the provider choices for a model.
-// The deliberately invalid __probe__ provider makes Cline return its routing
-// metadata without spending inference tokens. Both routing shapes are sent so
-// this works with planner and direct Cline pipelines.
+// handleProbeModelProviders first identifies the model's real Cline routing
+// pipeline with an ordinary request. Only after that succeeds do we send the
+// pipeline-specific invalid-provider request that returns its catalog. This is
+// important for cline-pass/* models: the gateway can discard provider fields,
+// in which case showing a guessed catalog would make every saved pin unsafe.
 func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Request) {
 	settings := s.Config.Get()
 	s.upstream.SetBaseURL(settings.BaseURL)
@@ -435,10 +436,6 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 	if strings.TrimSpace(payload.UpstreamModel) != "" {
 		upstreamModel = strings.TrimSpace(payload.UpstreamModel)
 	}
-	payload.Pipeline = strings.ToLower(strings.TrimSpace(payload.Pipeline))
-	if payload.Pipeline == "" {
-		payload.Pipeline = "both"
-	}
 	credential, ok := s.probeCredential(payload.CredentialID)
 	if !ok {
 		if strings.TrimSpace(payload.CredentialID) != "" {
@@ -453,58 +450,108 @@ func (s *Server) handleProbeModelProviders(w http.ResponseWriter, r *http.Reques
 	if probeTimeout <= 0 || probeTimeout > 30*time.Second {
 		probeTimeout = 30 * time.Second
 	}
-	var status int
-	var body []byte
-	var err error
-	var providers []string
-	var detectedPipeline string
-	for _, pipeline := range []string{"planner", "direct"} {
-		probe := map[string]any{
-			"model":    upstreamModel,
-			"messages": []any{map[string]any{"role": "user", "content": "provider probe"}},
-			// The invalid provider is intended to make Cline return its
-			// provider catalog without generating a response. Keep the same
-			// budget used by the reference switcher.
-			"stream":     false,
-			"max_tokens": 16,
-		}
-		if pipeline == "planner" {
-			probe["providerOptions"] = map[string]any{"gateway": map[string]any{"only": []string{"__probe__"}}}
-		} else {
-			probe["provider"] = map[string]any{"only": []string{"__probe__"}}
-		}
-		status, body, err = s.chat(ctxOrBackground(r), credential, probe, probeTimeout)
-		providers, detectedPipeline = providerProbeResults(body)
-		if len(providers) > 0 || detectedPipeline != "" {
-			break
-		}
-	}
-	if detectedPipeline == "" {
-		detectedPipeline = payload.Pipeline
-		if detectedPipeline == "both" {
-			detectedPipeline = "unknown"
-		}
-	}
-	providerViews := make([]map[string]string, 0, len(providers))
-	for _, provider := range providers {
+	outcome := s.probeModelProviders(ctxOrBackground(r), credential, upstreamModel, probeTimeout)
+	providerViews := make([]map[string]string, 0, len(outcome.providers))
+	for _, provider := range outcome.providers {
 		providerViews = append(providerViews, map[string]string{"name": provider, "status": "available"})
 	}
 	result := map[string]any{
-		"ok":             len(providers) > 0,
+		"ok":             len(outcome.providers) > 0 && outcome.pipeline != "",
+		"pinnable":       len(outcome.providers) > 0 && outcome.pipeline != "",
 		"model":          model,
 		"upstream_model": upstreamModel,
 		"credential":     credential.View(),
-		"pipeline":       detectedPipeline,
+		"pipeline":       outcome.pipeline,
 		"providers":      providerViews,
-		"status":         status,
+		"status":         outcome.status,
 	}
-	if actual := probeActualProvider(body); actual != "" {
-		result["actual_provider"] = actual
+	if outcome.actualProvider != "" {
+		result["actual_provider"] = outcome.actualProvider
 	}
-	if err != nil && len(providers) == 0 {
-		result["error"] = credentials.Sanitize(err.Error())
+	if outcome.err != nil {
+		result["error"] = credentials.Sanitize(outcome.err.Error())
+	} else if len(outcome.providers) == 0 {
+		result["error"] = "Cline did not return a provider catalog for this model; provider pinning cannot be verified"
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+type providerProbeOutcome struct {
+	status         int
+	providers      []string
+	pipeline       string
+	actualProvider string
+	err            error
+}
+
+// probeModelProviders keeps pipeline discovery and catalog discovery in one
+// path so the management probe and its tests cannot drift apart.
+func (s *Server) probeModelProviders(ctx context.Context, credential credentials.Record, model string, timeout time.Duration) providerProbeOutcome {
+	identify := map[string]any{
+		"model":      model,
+		"messages":   []any{map[string]any{"role": "user", "content": "Reply with the word OK"}},
+		"max_tokens": 16,
+		"stream":     false,
+	}
+	status, body, err := s.chat(ctx, credential, identify, timeout)
+	pipeline, actual := providerPipelineFromResponse(body)
+	outcome := providerProbeOutcome{status: status, pipeline: pipeline, actualProvider: actual, err: err}
+	if err != nil {
+		return outcome
+	}
+	if pipeline == "" {
+		outcome.err = errors.New("Cline response did not identify a provider pipeline; provider pinning cannot be verified")
+		return outcome
+	}
+
+	probe := map[string]any{
+		"model":      model,
+		"messages":   []any{map[string]any{"role": "user", "content": "provider probe"}},
+		"max_tokens": 16,
+		"stream":     false,
+	}
+	if pipeline == "planner" {
+		probe["providerOptions"] = map[string]any{"gateway": map[string]any{"only": []string{"__probe__"}}}
+	} else {
+		probe["provider"] = map[string]any{"only": []string{"__probe__"}}
+	}
+	catalogStatus, catalogBody, catalogErr := s.chat(ctx, credential, probe, timeout)
+	providers, catalogPipeline := providerProbeResults(catalogBody)
+	if catalogPipeline != "" && catalogPipeline != pipeline {
+		providers = nil
+		catalogErr = fmt.Errorf("Cline provider catalog used %s routing, but the model response used %s", catalogPipeline, pipeline)
+	}
+	outcome.status = catalogStatus
+	outcome.providers = providers
+	if len(providers) > 0 {
+		// The invalid-provider request is expected to return an error status.
+		// A parsed, model-specific catalog is still a successful discovery.
+		outcome.err = nil
+		return outcome
+	}
+	outcome.err = catalogErr
+	if outcome.err == nil {
+		outcome.err = errors.New("Cline did not return a provider catalog for this model; provider pinning cannot be verified")
+	}
+	return outcome
+}
+
+// providerPipelineFromResponse classifies only response evidence. A provider
+// list from an error is not enough to classify a model because the list may
+// belong to a different gateway layer.
+func providerPipelineFromResponse(body []byte) (string, string) {
+	root := unwrapCompletionEnvelope(body)
+	object, err := models.DecodeObject(root)
+	if err != nil {
+		return "", ""
+	}
+	if provider, final := completionProvider(object); final {
+		return "planner", provider
+	}
+	if provider, _ := completionProvider(object); provider != "" {
+		return "direct", provider
+	}
+	return "", ""
 }
 
 func (s *Server) probeCredential(id string) (credentials.Record, bool) {
@@ -774,11 +821,24 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		"max_tokens": 64,
 		"stream":     false,
 	}
-	applyProviderSelection(testPayload, entry.Providers)
+	applyProviderSelection(testPayload, entry.Providers, entry.ProviderPipeline)
 	status, body, err := s.chat(ctxOrBackground(r), credential, testPayload, time.Duration(settings.TimeoutSeconds)*time.Second)
 	latency := time.Since(started).Milliseconds()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "latency_ms": latency, "error": credentials.Sanitize(err.Error())})
+		return
+	}
+	actualProvider := probeActualProvider(body)
+	if !providerAllowed(entry.Providers, actualProvider) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":              false,
+			"status":          status,
+			"latency_ms":      latency,
+			"model":           payload.Model,
+			"upstream_model":  upstreamModel,
+			"actual_provider": actualProvider,
+			"error":           fmt.Sprintf("configured provider selection was not honored: requested [%s], Cline selected %q", strings.Join(entry.Providers, ", "), actualProvider),
+		})
 		return
 	}
 	reply := ""
@@ -788,13 +848,15 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":             status >= 200 && status < 300,
-		"status":         status,
-		"latency_ms":     latency,
-		"model":          payload.Model,
-		"upstream_model": upstreamModel,
-		"credential":     credential.View(),
-		"reply":          truncate(reply, 400),
+		"ok":                status >= 200 && status < 300,
+		"status":            status,
+		"latency_ms":        latency,
+		"model":             payload.Model,
+		"upstream_model":    upstreamModel,
+		"provider":          actualProvider,
+		"provider_pipeline": entry.ProviderPipeline,
+		"credential":        credential.View(),
+		"reply":             truncate(reply, 400),
 	})
 }
 

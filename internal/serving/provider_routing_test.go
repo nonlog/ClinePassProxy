@@ -84,3 +84,43 @@ func TestModelProviderSelectionRejectsSilentFallback(t *testing.T) {
 		t.Fatalf("actual provider was not recorded: %q", got)
 	}
 }
+
+func TestModelTestUsesPipelineAndRejectsActualProviderMismatch(t *testing.T) {
+	var upstreamBody map[string]any
+	cline := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok","provider_metadata":{"gateway":{"routing":{"finalProvider":"other"}}}}}]}`))
+	}))
+	defer cline.Close()
+
+	server, handler := newTestServer(t, cline.URL)
+	settings := server.Config.Get()
+	settings.Models = []models.Entry{{ID: "m", UpstreamID: "cline-pass/m", Providers: []string{"runware"}, ProviderPipeline: "planner"}}
+	if _, err := server.Config.Update(settings); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/models/test", strings.NewReader(`{"model":"m","prompt":"hi"}`))
+	request.Header.Set("Authorization", "Bearer management-token")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", recorder.Code, recorder.Body.String())
+	}
+	options := models.Object(upstreamBody["providerOptions"])
+	gateway := models.Object(options["gateway"])
+	if got := models.List(gateway["only"]); len(got) != 1 || models.String(got[0]) != "runware" {
+		t.Fatalf("providerOptions.gateway.only = %#v", gateway["only"])
+	}
+	var response map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if models.Bool(response["ok"]) || !strings.Contains(models.String(response["error"]), "not honored") {
+		t.Fatalf("response = %#v", response)
+	}
+}

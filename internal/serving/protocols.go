@@ -184,12 +184,23 @@ func providerSelectionMismatch(request *requestContext) error {
 	if actual == "" {
 		return nil
 	}
-	for _, allowed := range request.providers {
-		if providerKey(allowed) == providerKey(actual) {
-			return nil
-		}
+	if providerAllowed(request.providers, actual) {
+		return nil
 	}
 	return fmt.Errorf("%w: requested [%s], Cline selected %q", errProviderSelection, strings.Join(request.providers, ", "), actual)
+}
+
+func providerAllowed(allowed []string, actual string) bool {
+	actual = strings.TrimSpace(actual)
+	if actual == "" {
+		return true
+	}
+	for _, name := range allowed {
+		if providerKey(name) == providerKey(actual) {
+			return true
+		}
+	}
+	return false
 }
 
 func providerKey(value string) string {
