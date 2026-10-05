@@ -14,6 +14,11 @@ func ResponsesToChatCompletions(body []byte, upstreamModel string, stream bool) 
 	if err != nil {
 		return nil, err
 	}
+	declarations := responsesRequestToolDeclarations(root)
+	if err := validateResponsesToolSearch(root, declarations); err != nil {
+		return nil, err
+	}
+	searchName := responsesSearchToolName(declarations)
 	out := map[string]any{
 		"model":    upstreamModel,
 		"messages": []any{},
@@ -42,7 +47,7 @@ func ResponsesToChatCompletions(body []byte, upstreamModel string, stream bool) 
 	if instructions := responsesInstructionsText(root["instructions"]); instructions != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": instructions})
 	}
-	input, err := responsesInputMessages(root["input"], "")
+	input, err := responsesInputMessages(root["input"], "", searchName)
 	if err != nil {
 		return nil, err
 	}
@@ -52,10 +57,12 @@ func ResponsesToChatCompletions(body []byte, upstreamModel string, stream bool) 
 	}
 	out["messages"] = messages
 
-	if tools := responsesTools(root["tools"]); len(tools) > 0 {
+	if tools := responsesTools(declarations); len(tools) > 0 {
 		out["tools"] = tools
 	}
-	if choice, ok := responsesToolChoice(root["tool_choice"]); ok {
+	if models.String(models.Object(root["tool_choice"])["type"]) == "tool_search" {
+		out["tool_choice"] = map[string]any{"type": "function", "function": map[string]any{"name": searchName}}
+	} else if choice, ok := responsesToolChoice(root["tool_choice"]); ok {
 		out["tool_choice"] = choice
 	}
 	if format := responsesStructuredFormat(root["text"]); format != nil {
@@ -103,7 +110,7 @@ func responsesReasoningEffort(value any) string {
 // single assistant message. Rebuilding that shape is what keeps the upstream
 // prompt identical to the turn the provider produced, which is what the prompt
 // cache is keyed on.
-func responsesInputMessages(value any, namespace string) ([]any, error) {
+func responsesInputMessages(value any, namespace, searchName string) ([]any, error) {
 	if text, ok := value.(string); ok {
 		return []any{map[string]any{"role": "user", "content": text}}, nil
 	}
@@ -126,11 +133,11 @@ func responsesInputMessages(value any, namespace string) ([]any, error) {
 			continue
 		}
 		switch strings.TrimSpace(models.String(item["type"])) {
-		case "function_call", "custom_tool_call":
+		case "function_call", "custom_tool_call", "tool_search_call":
 			if id := responsesCallID(item); id != "" {
 				callIDs[id] = true
 			}
-		case "function_call_output", "custom_tool_call_output":
+		case "function_call_output", "custom_tool_call_output", "tool_search_output":
 			if id := responsesCallID(item); id != "" {
 				explicitOutputCounts[id]++
 			} else {
@@ -153,6 +160,18 @@ func responsesInputMessages(value any, namespace string) ([]any, error) {
 			continue
 		}
 		switch strings.TrimSpace(models.String(item["type"])) {
+		case "tool_search_call":
+			callID := responsesCallID(item)
+			units = append(units, responsesUnit{
+				kind: unitToolCall, callID: callID,
+				call: responsesToolCall(callID, searchName, StableJSON(item["arguments"])),
+			})
+		case "tool_search_output":
+			loaded := responsesTools(item["tools"])
+			units = append(units, responsesUnit{
+				kind: unitToolOutput, callID: responsesCallID(item),
+				output: map[string]any{"role": "tool", "content": StableJSON(map[string]any{"tools": loaded})},
+			})
 		case "function_call":
 			callID := responsesCallID(item)
 			itemNamespace := strings.TrimSpace(models.String(item["namespace"]))
@@ -596,9 +615,19 @@ func responsesTools(value any) []any {
 			if tool == nil {
 				continue
 			}
+			toolNamespace := namespace
+			if declared := models.String(tool["namespace"]); declared != "" {
+				toolNamespace = declared
+			}
 			switch strings.TrimSpace(models.String(tool["type"])) {
 			case "namespace":
 				walk(models.List(tool["tools"]), strings.TrimSpace(models.String(tool["name"])))
+			case "tool_search":
+				out = append(out, map[string]any{
+					"type": "function", "function": map[string]any{
+						"name": models.String(tool["name"]), "description": models.String(tool["description"]), "parameters": tool["parameters"],
+					},
+				})
 			case "function":
 				name := strings.TrimSpace(models.String(tool["name"]))
 				if name == "" {
@@ -615,20 +644,20 @@ func responsesTools(value any) []any {
 				out = append(out, map[string]any{
 					"type": "function",
 					"function": map[string]any{
-						"name":        responsesChatToolName(namespace, name),
+						"name":        responsesChatToolName(toolNamespace, name),
 						"description": models.String(function["description"]),
 						"parameters":  parameters,
 					},
 				})
 			case "custom":
-				name := responsesChatToolName(namespace, models.String(tool["name"]))
+				name := responsesChatToolName(toolNamespace, models.String(tool["name"]))
 				if name == "" {
 					continue
 				}
 				out = append(out, map[string]any{
 					"type": "function",
 					"function": map[string]any{
-						"name":        responsesChatToolName(namespace, responsesCustomToolName(name)),
+						"name":        responsesChatToolName(toolNamespace, responsesCustomToolName(name)),
 						"description": responsesCustomToolDescription(tool),
 						"parameters": map[string]any{
 							"type": "object",

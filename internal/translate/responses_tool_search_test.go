@@ -142,3 +142,50 @@ func TestResponsesClientToolSearchRejectsInvalidArguments(t *testing.T) {
 		}
 	}
 }
+
+func TestResponsesClientToolSearchNameCollision(t *testing.T) {
+	root, _ := models.DecodeObject([]byte(clientSearchRequest))
+	root["tools"] = append(models.List(root["tools"]), map[string]any{"type": "function", "name": "tool_search", "parameters": map[string]any{"type": "object"}})
+	original := JSONBytes(root)
+	payload, translated := searchTranslation(t, original)
+	tools := models.List(payload["tools"])
+	if len(tools) != 2 || models.String(models.Object(models.Object(tools[0])["function"])["name"]) != "tool_search_1" {
+		t.Fatalf("native search collided with user function: %#v", tools)
+	}
+	for name, wantType := range map[string]string{"tool_search": "function_call", "tool_search_1": "tool_search_call"} {
+		raw := []byte(fmt.Sprintf(`{"choices":[{"message":{"tool_calls":[{"id":"s","function":{"name":%q,"arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`, name))
+		converted, err := OpenAICompletionToResponses(raw, "m", original, translated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, _ := models.DecodeObject(converted)
+		if kind := models.String(models.Object(models.List(response["output"])[0])["type"]); kind != wantType {
+			t.Fatalf("%s restored as %s, want %s", name, kind, wantType)
+		}
+	}
+}
+
+func TestResponsesLoadedAdditionalToolsAndDeferredVisibility(t *testing.T) {
+	root, _ := models.DecodeObject([]byte(clientSearchRequest))
+	loaded := map[string]any{"type": "namespace", "name": "mcp__probe", "tools": []any{map[string]any{"type": "function", "name": "ping", "defer_loading": true, "parameters": map[string]any{"type": "object"}}}}
+	root["tools"] = append(models.List(root["tools"]), loaded)
+	payload, _ := searchTranslation(t, JSONBytes(root))
+	if count := len(models.List(payload["tools"])); count != 1 {
+		t.Fatalf("unloaded deferred function leaked before discovery: %#v", payload)
+	}
+	root["input"] = []any{map[string]any{"role": "user", "content": "ping"}, map[string]any{"type": "additional_tools", "role": "developer", "tools": []any{loaded}}, map[string]any{"type": "additional_tools", "role": "developer", "tools": []any{loaded}}}
+	payload, translated := searchTranslation(t, JSONBytes(root))
+	if tools := models.List(payload["tools"]); len(tools) != 2 || models.String(models.Object(models.Object(tools[1])["function"])["name"]) != "mcp__probe__ping" {
+		t.Fatalf("loaded definitions were lost or duplicated: %#v", tools)
+	}
+	raw := []byte(`{"choices":[{"message":{"tool_calls":[{"id":"p","function":{"name":"mcp__probe__ping","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)
+	converted, err := OpenAICompletionToResponses(raw, "m", JSONBytes(root), translated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, _ := models.DecodeObject(converted)
+	item := models.Object(models.List(response["output"])[0])
+	if item["namespace"] != "mcp__probe" || item["name"] != "ping" {
+		t.Fatalf("loaded namespace identity lost: %#v", item)
+	}
+}

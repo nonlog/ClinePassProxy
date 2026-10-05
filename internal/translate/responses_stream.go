@@ -45,6 +45,7 @@ type ResponsesToolIdentity struct {
 	Name      string
 	Namespace string
 	Custom    bool
+	Search    bool
 }
 
 type responsesToolState struct {
@@ -348,7 +349,7 @@ func (c *ResponsesStreamConverter) ensureTool(state *responsesToolState, out *[]
 	if state.Started {
 		return nil
 	}
-	if state.ID == "" && state.Name == "" {
+	if state.Name == "" {
 		return nil
 	}
 	if state.ID == "" {
@@ -370,6 +371,9 @@ func (c *ResponsesStreamConverter) ensureTool(state *responsesToolState, out *[]
 			"id": itemID, "type": itemType, "status": "in_progress",
 			"input": "", "call_id": state.ID, "name": name,
 		}
+	}
+	if state.Identity.Search {
+		item = responsesSearchCallItem(state.ID, "in_progress", map[string]any{})
 	}
 	if state.Identity.Namespace != "" {
 		item["namespace"] = state.Identity.Namespace
@@ -413,6 +417,20 @@ func (c *ResponsesStreamConverter) closeTool(state *responsesToolState, out *[][
 		args = "{}"
 	}
 	status, _ := responsesIncomplete(c.finishReason)
+	if state.Identity.Search {
+		arguments, err := responsesSearchArguments(args)
+		if err != nil {
+			return err
+		}
+		if err := AppendSSE(out, "response.output_item.done", map[string]any{
+			"type": "response.output_item.done", "sequence_number": c.nextSeq(), "output_index": state.OutputIndex,
+			"item": responsesSearchCallItem(state.ID, status, arguments),
+		}); err != nil {
+			return err
+		}
+		state.Done = true
+		return nil
+	}
 	name := state.Identity.Name
 	if name == "" {
 		name = state.Name
@@ -575,7 +593,7 @@ func (c *ResponsesStreamConverter) Feed(raw []byte) ([][]byte, error) {
 				if err := c.ensureTool(state, &out); err != nil {
 					return nil, err
 				}
-				if argsDelta != "" && state.Started && !state.Identity.Custom {
+				if argsDelta != "" && state.Started && !state.Identity.Custom && !state.Identity.Search {
 					if err := AppendSSE(&out, "response.function_call_arguments.delta", map[string]any{
 						"type": "response.function_call_arguments.delta", "sequence_number": c.nextSeq(),
 						"item_id": "fc_" + state.ID, "output_index": state.OutputIndex, "delta": argsDelta,
@@ -671,7 +689,16 @@ func (c *ResponsesStreamConverter) completedOutput() []any {
 			args = "{}"
 		}
 		var item map[string]any
-		if state.Identity.Custom {
+		if state.Identity.Search {
+			// Arguments were validated when the item closed. Error frames may
+			// describe a still-open/invalid item, which must remain incomplete.
+			arguments, err := responsesSearchArguments(args)
+			searchStatus := status
+			if err != nil || !state.Done {
+				arguments, searchStatus = map[string]any{}, "incomplete"
+			}
+			item = responsesSearchCallItem(state.ID, searchStatus, arguments)
+		} else if state.Identity.Custom {
 			item = map[string]any{
 				"id": "ctc_" + state.ID, "type": "custom_tool_call", "status": status,
 				"input": unwrapResponsesCustomInput(args), "call_id": state.ID, "name": name,
@@ -823,6 +850,11 @@ func OpenAICompletionToResponses(raw []byte, model string, originalRequest, tran
 				state.ID = "call_" + NewID()
 			}
 			state.Arguments.WriteString(models.String(function["arguments"]))
+			if state.Identity.Search {
+				if _, err := responsesSearchArguments(state.Arguments.String()); err != nil {
+					return nil, err
+				}
+			}
 			converter.tools[responsesToolKey(index, toolIndex)] = state
 		}
 		if finish := models.String(choice["finish_reason"]); finish != "" {
@@ -863,7 +895,7 @@ func buildResponsesToolMap(originalRequest, translatedRequest []byte) (map[strin
 	}
 	ambiguous := map[string]bool{}
 	for _, declaration := range declarations {
-		if existing, ok := byLocal[declaration.Name]; ok && (existing.Namespace != declaration.Namespace || existing.Custom != declaration.Custom) {
+		if existing, ok := byLocal[declaration.Name]; ok && (existing.Namespace != declaration.Namespace || existing.Custom != declaration.Custom || existing.Search != declaration.Search) {
 			ambiguous[declaration.Name] = true
 			continue
 		}
@@ -879,33 +911,15 @@ func collectResponsesToolDeclarations(raw []byte) []ResponsesToolIdentity {
 	var root map[string]any
 	_ = json.Unmarshal(raw, &root)
 	var out []ResponsesToolIdentity
-	var scan func([]any, string)
-	scan = func(tools []any, namespace string) {
-		for _, rawTool := range tools {
-			tool := models.Object(rawTool)
-			kind := strings.TrimSpace(models.String(tool["type"]))
-			if kind == "namespace" {
-				scan(models.List(tool["tools"]), strings.TrimSpace(models.String(tool["name"])))
-				continue
-			}
-			if kind != "" && kind != "function" && kind != "custom" {
-				continue
-			}
-			name := strings.TrimSpace(models.String(tool["name"]))
-			if name == "" {
-				name = strings.TrimSpace(models.String(models.Object(tool["function"])["name"]))
-			}
-			if name == "" {
-				continue
-			}
-			out = append(out, ResponsesToolIdentity{Name: name, Namespace: namespace, Custom: kind == "custom"})
+	for _, rawTool := range responsesRequestToolDeclarations(root) {
+		tool := models.Object(rawTool)
+		kind := models.String(tool["type"])
+		name := strings.TrimSpace(models.String(tool["name"]))
+		if name == "" {
+			name = strings.TrimSpace(models.String(models.Object(tool["function"])["name"]))
 		}
-	}
-	scan(models.List(root["tools"]), "")
-	for _, rawItem := range models.List(root["input"]) {
-		item := models.Object(rawItem)
-		if models.String(item["type"]) == "additional_tools" {
-			scan(models.List(item["tools"]), "")
+		if name != "" {
+			out = append(out, ResponsesToolIdentity{Name: name, Namespace: models.String(tool["namespace"]), Custom: kind == "custom", Search: kind == "tool_search"})
 		}
 	}
 	return out

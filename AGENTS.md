@@ -85,6 +85,14 @@ Each of these was a real defect found in review. They are invariants, not prefer
 - **Management route parity.** Any management endpoint called by the console
   must also be advertised by `cpa-connector` and verified through the CPA origin.
   Deploy the Actions-built connector when its routes change, not only the proxy.
+- **Responses tool discovery.** Client-executed `tool_search` must survive the
+  Chat Completions bridge as a dedicated identity, returning native
+  `tool_search_call` items with object arguments and the original `call_id`.
+  Replay `tool_search_output`, load its namespace/function/custom definitions
+  (and `additional_tools`), and do not expose still-deferred definitions early.
+  Stream and non-stream behavior must match. Invalid search arguments fail;
+  hosted/server tool search is explicitly unsupported, never silently dropped.
+  An ordinary function named `tool_search` is not the native discovery tool.
 
 ## Supported surface
 

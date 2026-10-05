@@ -51,6 +51,18 @@ GET  /health
 GET  /ready
 ```
 
+`/v1/responses` is a protocol bridge, not native upstream Responses passthrough.
+Client-executed `tool_search` is bridged end-to-end: the client schema becomes a
+Chat function, provider calls return native `tool_search_call` items, and
+`tool_search_output` loads discovered namespace/function/custom definitions for
+following turns. `additional_tools` is also loaded. Still-deferred definitions
+are not exposed before discovery, and ordinary functions named `tool_search`
+remain ordinary functions. Streaming and blocking responses share this mapping.
+Hosted/server tool search is not implemented by the Cline Chat upstream and is
+rejected explicitly. This does not use the independent `/v1/alpha/search` web
+search adapter. It preserves existing request-history order; it does not claim
+OpenAI's native append-only tool-loading cache behavior for the Chat upstream.
+
 Management API and the web UI live under `/api/*` and `/`.
 
 ## Console
