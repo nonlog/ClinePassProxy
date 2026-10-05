@@ -1,0 +1,32 @@
+{
+  "protocol": "openai-responses",
+  "note": "CPP client-executed tool-search extension: preserve discovery call/output pairing and load returned namespace definitions. This extends, rather than claims parity with, the older CPA fixture corpus.",
+  "request": {
+    "input": [
+      {"role":"user","content":"find ping"},
+      {"type":"tool_search_call","execution":"client","call_id":"search1","arguments":{"query":"probe ping"}},
+      {"type":"tool_search_output","execution":"client","call_id":"search1","tools":[{"type":"namespace","name":"mcp__probe","tools":[{"type":"function","name":"ping","defer_loading":true,"description":"ping probe","parameters":{"type":"object","properties":{}}}]}]},
+      {"type":"function_call","namespace":"mcp__probe","name":"ping","call_id":"ping1","arguments":"{}"},
+      {"type":"function_call_output","call_id":"ping1","output":"pong"}
+    ],
+    "tools": [
+      {"type":"tool_search","execution":"client","description":"discover","parameters":{"type":"object","properties":{"query":{"type":"string"}}}},
+      {"type":"namespace","name":"mcp__probe","tools":[{"type":"function","name":"ping","defer_loading":true,"description":"old deferred schema","parameters":{"type":"object","properties":{}}}]}
+    ]
+  },
+  "expected": {
+    "model":"upstream-model",
+    "stream":true,
+    "messages":[
+      {"role":"user","content":[{"type":"text","text":"find ping"}]},
+      {"role":"assistant","content":"","tool_calls":[{"id":"search1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"probe ping\"}"}}]},
+      {"role":"tool","tool_call_id":"search1","content":"{\"tools\":[{\"function\":{\"description\":\"ping probe\",\"name\":\"mcp__probe__ping\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"}]}"},
+      {"role":"assistant","content":"","tool_calls":[{"id":"ping1","type":"function","function":{"name":"mcp__probe__ping","arguments":"{}"}}]},
+      {"role":"tool","tool_call_id":"ping1","content":"pong"}
+    ],
+    "tools":[
+      {"type":"function","function":{"name":"tool_search","description":"discover","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}},
+      {"type":"function","function":{"name":"mcp__probe__ping","description":"ping probe","parameters":{"type":"object","properties":{}}}}
+    ]
+  }
+}
