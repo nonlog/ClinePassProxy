@@ -18,7 +18,7 @@
     "model":"upstream-model",
     "stream":true,
     "messages":[
-      {"role":"user","content":[{"type":"text","text":"find ping"}]},
+      {"role":"user","content":"find ping"},
       {"role":"assistant","content":"","tool_calls":[{"id":"search1","type":"function","function":{"name":"tool_search","arguments":"{\"query\":\"probe ping\"}"}}]},
       {"role":"tool","tool_call_id":"search1","content":"{\"tools\":[{\"function\":{\"description\":\"ping probe\",\"name\":\"mcp__probe__ping\",\"parameters\":{\"properties\":{},\"type\":\"object\"}},\"type\":\"function\"}]}"},
       {"role":"assistant","content":"","tool_calls":[{"id":"ping1","type":"function","function":{"name":"mcp__probe__ping","arguments":"{}"}}]},
