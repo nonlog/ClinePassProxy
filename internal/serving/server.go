@@ -76,6 +76,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /ready", s.handleReady)
 
 	// Inference data plane.
+	mux.Handle("GET /v1/models", s.inference(s.handleOpenAIModels))
 	mux.Handle("POST /v1/messages", s.inference(s.handleMessages))
 	mux.Handle("POST /v1/responses", s.inference(s.handleResponses))
 	mux.Handle("POST /v1/chat/completions", s.inference(s.handleChatCompletions))
@@ -142,6 +143,30 @@ func (s *Server) handleVersion(w http.ResponseWriter, _ *http.Request) {
 }
 
 // ---------------------------------------------------------------- inference
+
+// handleOpenAIModels exposes the configured client-facing model catalog using
+// the standard OpenAI /v1/models response shape. Disabled entries are omitted,
+// and aliases report their public ID rather than the upstream Cline model ID.
+func (s *Server) handleOpenAIModels(w http.ResponseWriter, _ *http.Request) {
+	settings := s.Config.Get()
+	data := make([]map[string]any, 0, len(settings.Models))
+	for _, entry := range settings.Models {
+		id := strings.TrimSpace(entry.ID)
+		if id == "" || entry.Disabled {
+			continue
+		}
+		data = append(data, map[string]any{
+			"id":       id,
+			"object":   "model",
+			"created":  0,
+			"owned_by": "ClinePassProxy",
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"object": "list",
+		"data":   data,
+	})
+}
 
 // inference wraps a data-plane handler with gateway authentication.
 func (s *Server) inference(next http.HandlerFunc) http.Handler {
