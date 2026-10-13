@@ -809,7 +809,7 @@
               ]);
             } }
         ], rows, { emptyTitle: "没有模型别名", emptyDetail: "没有别名时，客户端模型 ID 会原样透传给 Cline。" }))),
-      ui.section("ClinePass 预置模型", "官方目录仅用于快速添加，不会自动改变现有别名或 Provider 设置。",
+      ui.section("ClinePass 预置模型", "不会自动更新或修改现有配置；新模型可参照官方文档通过“添加别名”手动添加。",
         [el("a", { class: "btn small", href: presetSource, target: "_blank", rel: "noopener noreferrer" }, "查看官方文档")],
         el("div", { class: "card" }, ui.table([
           { label: "模型", render: function (row) { return el("span", { text: row.preset.name }); } },

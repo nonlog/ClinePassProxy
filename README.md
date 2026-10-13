@@ -149,8 +149,9 @@ The Models page also shows the current ClinePass preset catalog and links to the
 [official ClinePass model documentation](https://docs.cline.bot/getting-started/clinepass).
 Preset entries are reference data: importing one into the alias table is an
 explicit operator action, so existing pass-through or custom model settings are
-not overwritten. When Cline updates its list, compare the official page and add
-new IDs manually from the preset section.
+not overwritten. The bundled catalog does not update automatically. When Cline
+updates its list, compare the official page and use Add Alias to enter new IDs
+manually.
 
 When a model alias has `providers`, CPP sends the allow-list in the routing
 shape discovered for that exact upstream model: planner models use

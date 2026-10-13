@@ -71,7 +71,7 @@ async function modelForm(options = {}) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "pages.js"), "utf8"), context);
   const page = await context.CPPPages.models();
   if (options.empty) {
-    nodes(page, node => node.tag === "button" && node.textContent === "添加")[0].emit("click");
+    nodes(page, node => node.tag === "button" && node.textContent === (options.addAlias ? "添加别名" : "添加"))[0].emit("click");
   } else {
     nodes(page, node => node.tag === "button" && node.textContent === "编辑")[0].emit("click");
   }
@@ -90,9 +90,44 @@ test("preset ClinePass catalog fills the add form and keeps the documentation li
   const form = await modelForm({ empty: true, presets: [preset] });
   assert.match(form.page.textContent, /ClinePass 预置模型/);
   assert.match(form.page.textContent, /ClinePass 文档/);
+  for (const link of nodes(form.page, node => node.tag === "a")) {
+    assert.equal(link.attributes.href, "https://docs.cline.bot/getting-started/clinepass");
+    assert.equal(link.attributes.rel, "noopener noreferrer");
+  }
   const inputs = nodes(form.modal, node => node.tag === "input" && !node.attributes.type);
   assert.equal(inputs[0].value, preset.id);
   assert.equal(inputs[1].value, preset.id);
+});
+
+test("changing the preset dropdown saves the chosen model without reusing another model's providers", async () => {
+  const presets = [
+    { name: "GLM-5.3", id: "cline-pass/glm-5.3" },
+    { name: "Kimi K3", id: "cline-pass/kimi-k3" }
+  ];
+  const form = await modelForm({ empty: true, presets,
+    probe: async () => ({ ok: true, pipeline: "planner", providers: ["glm-provider"] }) });
+  await form.click("探测 Provider");
+  await form.click("全选");
+  const select = nodes(form.modal, node => node.tag === "select")[0];
+  select.value = presets[1].id;
+  select.emit("change");
+  assert.equal(form.button("全选").disabled, true);
+  await form.click("添加");
+  assert.equal(form.saved()[0].id, presets[1].id);
+  assert.equal(form.saved()[0].upstream_id, presets[1].id);
+  assert.deepEqual(form.saved()[0].providers, []);
+  assert.equal(form.saved()[0].provider_pipeline, "");
+});
+
+test("the preset dropdown still allows manually adding newly documented models", async () => {
+  const form = await modelForm({ empty: true, addAlias: true,
+    presets: [{ name: "GLM-5.3", id: "cline-pass/glm-5.3" }] });
+  const inputs = nodes(form.modal, node => node.tag === "input" && !node.attributes.type);
+  inputs[0].value = "new-model-alias";
+  inputs[1].value = "cline-pass/new-model";
+  await form.click("添加");
+  assert.equal(form.saved()[0].id, "new-model-alias");
+  assert.equal(form.saved()[0].upstream_id, "cline-pass/new-model");
 });
 
 test("model form excludes global provider history and labels its own unconfirmed values", async () => {
