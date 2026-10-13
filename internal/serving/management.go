@@ -392,11 +392,13 @@ func (s *Server) handleListModels(w http.ResponseWriter, _ *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"models":             views,
-		"seen_models":        s.History.Models(50),
-		"observed_providers": observedProviders,
-		"passthrough":        len(settings.Models) == 0,
-		"default_for_test":   defaultTestModel(settings),
+		"models":               views,
+		"preset_models":        models.ClinePassPresets(),
+		"preset_models_source": models.ClinePassCatalogURL,
+		"seen_models":          s.History.Models(50),
+		"observed_providers":   observedProviders,
+		"passthrough":          len(settings.Models) == 0,
+		"default_for_test":     defaultTestModel(settings),
 	})
 }
 

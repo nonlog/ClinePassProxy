@@ -38,6 +38,7 @@ async function modelForm(options = {}) {
   let modal;
   let saved;
   const entry = Object.assign({ id: "glm", upstream_id: "cline-pass/glm-5.3-flash", providers: ["saved"], observed_providers: ["history"] }, options.entry);
+  const entries = options.empty ? [] : [entry];
   const context = {
     Node,
     document: {
@@ -48,7 +49,7 @@ async function modelForm(options = {}) {
     CPPFormat: { DASH: "-" }, CPPQuota: {}, CPPApp: { render() {} },
     CPPApi: {
       async api(url, request) {
-        if (url === "/api/models") return Object.assign({ models: [entry], providers: ["global"], observed_providers: ["other-model"] }, options.payload);
+        if (url === "/api/models") return Object.assign({ models: entries, preset_models: options.presets || [], providers: ["global"], observed_providers: ["other-model"] }, options.payload);
         if (url === "/api/config" && request) { saved = JSON.parse(request.body).models; return {}; }
         if (url === "/api/config") return {};
         if (url === "/api/credentials") return { credentials: [] };
@@ -69,16 +70,30 @@ async function modelForm(options = {}) {
   };
   vm.runInContext(fs.readFileSync(path.join(__dirname, "pages.js"), "utf8"), context);
   const page = await context.CPPPages.models();
-  nodes(page, node => node.tag === "button" && node.textContent === "编辑")[0].emit("click");
+  if (options.empty) {
+    nodes(page, node => node.tag === "button" && node.textContent === "添加")[0].emit("click");
+  } else {
+    nodes(page, node => node.tag === "button" && node.textContent === "编辑")[0].emit("click");
+  }
   const button = label => nodes(modal, node => node.tag === "button" && node.textContent === label)[0];
   return {
-    modal, button,
+    page, modal, button,
     choices: () => nodes(modal, node => node.tag === "label" && nodes(node, child => child.tag === "span" && child.className === "mono").length),
     names: () => nodes(modal, node => node.tag === "span" && node.className === "mono").map(node => node.textContent),
     async click(label) { button(label).emit("click"); await Promise.all(pending.splice(0)); await Promise.resolve(); },
     saved: () => saved
   };
 }
+
+test("preset ClinePass catalog fills the add form and keeps the documentation link", async () => {
+  const preset = { name: "GLM-5.3", id: "cline-pass/glm-5.3" };
+  const form = await modelForm({ empty: true, presets: [preset] });
+  assert.match(form.page.textContent, /ClinePass 预置模型/);
+  assert.match(form.page.textContent, /ClinePass 文档/);
+  const inputs = nodes(form.modal, node => node.tag === "input" && !node.attributes.type);
+  assert.equal(inputs[0].value, preset.id);
+  assert.equal(inputs[1].value, preset.id);
+});
 
 test("model form excludes global provider history and labels its own unconfirmed values", async () => {
   const form = await modelForm();

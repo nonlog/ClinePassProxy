@@ -42,10 +42,18 @@ func TestListModelsScopesObservedProvidersPerModel(t *testing.T) {
 			ID                string   `json:"id"`
 			ObservedProviders []string `json:"observed_providers"`
 		} `json:"models"`
-		ObservedProviders []string `json:"observed_providers"`
+		ObservedProviders []string        `json:"observed_providers"`
+		PresetModels      []models.Preset `json:"preset_models"`
+		PresetSource      string          `json:"preset_models_source"`
 	}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
+	}
+	if len(response.PresetModels) != 12 || response.PresetModels[0].ID != "cline-pass/glm-5.3" {
+		t.Fatalf("preset models = %#v", response.PresetModels)
+	}
+	if response.PresetSource != models.ClinePassCatalogURL {
+		t.Fatalf("preset source = %q", response.PresetSource)
 	}
 	if len(response.Models) != 3 {
 		t.Fatalf("models = %#v", response.Models)

@@ -145,6 +145,13 @@ requests use `/v1/alpha/search`; Claude Code native `web_search_*` requests use
 An empty alias table means model IDs pass through to Cline unchanged. Once any
 alias exists, only listed IDs are accepted, which keeps the proxy fail-closed.
 
+The Models page also shows the current ClinePass preset catalog and links to the
+[official ClinePass model documentation](https://docs.cline.bot/getting-started/clinepass).
+Preset entries are reference data: importing one into the alias table is an
+explicit operator action, so existing pass-through or custom model settings are
+not overwritten. When Cline updates its list, compare the official page and add
+new IDs manually from the preset section.
+
 When a model alias has `providers`, CPP sends the allow-list in the routing
 shape discovered for that exact upstream model: planner models use
 `providerOptions.gateway.only`, while direct OpenRouter models use

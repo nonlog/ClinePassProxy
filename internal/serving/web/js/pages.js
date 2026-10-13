@@ -517,6 +517,8 @@
     var payload = await client.api("/api/models");
     state.models = payload;
     var list = payload.models || [];
+    var presets = payload.preset_models || [];
+    var presetSource = payload.preset_models_source || "https://docs.cline.bot/getting-started/clinepass";
     var seen = payload.seen_models || [];
     var config = await client.api("/api/config");
     state.config = config;
@@ -535,9 +537,11 @@
       });
     }
 
-    function modelForm(entry) {
-      var idInput = el("input", { value: entry ? entry.id : "", placeholder: "cline-pass/claude-sonnet-4.5" });
-      var upstreamInput = el("input", { value: entry ? entry.upstream_id || "" : "", placeholder: "上游模型 ID（留空 = 同名）" });
+    function modelForm(entry, preset) {
+      var initialID = entry ? entry.id : preset ? preset.id : "";
+      var initialUpstreamID = entry ? entry.upstream_id || "" : preset ? preset.id : "";
+      var idInput = el("input", { value: initialID, placeholder: "从预置列表选择，或输入 cline-pass/模型名" });
+      var upstreamInput = el("input", { value: initialUpstreamID, placeholder: "上游模型 ID（留空 = 同名）" });
       var selectedProviders = Object.create(null);
       var providerOptions = Object.create(null);
       var providerPipeline = entry && entry.provider_pipeline || "";
@@ -567,6 +571,22 @@
       var providerList = el("div", { class: "stack", style: "gap:4px" });
       var providerHint = el("span", { class: "hint", "aria-live": "polite", text: "当前模型尚未探测；历史命中不代表当前可路由。" });
       var probeButton = el("button", { class: "btn small", type: "button" }, "探测 Provider");
+      var presetSelect = null;
+
+      if (!entry && presets.length) {
+        presetSelect = el("select", {});
+        presetSelect.appendChild(el("option", { value: "", text: "选择 ClinePass 预置模型…" }));
+        presets.forEach(function (item) {
+          presetSelect.appendChild(el("option", { value: item.id, text: item.name + " · " + item.id, selected: item.id === initialID }));
+        });
+        presetSelect.addEventListener("change", function () {
+          var selected = presets.find(function (item) { return item.id === presetSelect.value; });
+          if (!selected) return;
+          idInput.value = selected.id;
+          upstreamInput.value = selected.id;
+          invalidateProviders();
+        });
+      }
 
       function statusLabel(status) {
         var labels = { available: "上游列出", ok: "上游列出", unavailable: "不可用", rate_limited: "限流", unknown: "未确认" };
@@ -701,6 +721,7 @@
         title: entry ? "编辑模型 " + entry.id : "添加模型别名",
         narrow: true,
         body: el("div", { class: "form-grid" }, [
+          presetSelect ? el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "ClinePass 预置模型" }), presetSelect]) : null,
           el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "客户端模型 ID" }), idInput]),
           el("label", { class: "field", style: "grid-column:1/-1" }, [el("span", { text: "上游模型 ID" }), upstreamInput]),
           el("div", { class: "field", style: "grid-column:1/-1" }, [
@@ -759,7 +780,10 @@
     var rows = list.map(function (entry) { return { entry: entry }; });
     return ui.fragment([
       ui.section("模型别名", payload.passthrough ? "当前没有别名表：客户端模型 ID 直接透传给 Cline" : "别名表已启用",
-        [el("button", { class: "btn primary", type: "button", onclick: function () { modelForm(null); } }, "添加别名")],
+        [
+          el("a", { class: "btn small", href: presetSource, target: "_blank", rel: "noopener noreferrer" }, "ClinePass 文档"),
+          el("button", { class: "btn primary", type: "button", onclick: function () { modelForm(null); } }, "添加别名")
+        ],
         el("div", { class: "card" }, ui.table([
           { label: "客户端模型 ID", render: function (row) { return el("span", { class: "mono cell-strong", text: row.entry.id }); } },
           { label: "上游模型 ID", render: function (row) { return el("span", { class: "mono", text: row.entry.upstream_id || row.entry.id }); } },
@@ -785,6 +809,20 @@
               ]);
             } }
         ], rows, { emptyTitle: "没有模型别名", emptyDetail: "没有别名时，客户端模型 ID 会原样透传给 Cline。" }))),
+      ui.section("ClinePass 预置模型", "官方目录仅用于快速添加，不会自动改变现有别名或 Provider 设置。",
+        [el("a", { class: "btn small", href: presetSource, target: "_blank", rel: "noopener noreferrer" }, "查看官方文档")],
+        el("div", { class: "card" }, ui.table([
+          { label: "模型", render: function (row) { return el("span", { text: row.preset.name }); } },
+          { label: "模型 ID", render: function (row) { return el("span", { class: "mono", text: row.preset.id }); } },
+          { label: "状态", render: function (row) { return row.added ? ui.badge("已添加", "ok") : ui.badge("可添加", "info"); } },
+          { label: "操作", render: function (row) {
+              return row.added
+                ? ui.badge("请在上方编辑", "plain")
+                : el("button", { class: "btn small", type: "button", onclick: function () { modelForm(null, row.preset); } }, "添加");
+            } }
+        ], presets.map(function (preset) {
+          return { preset: preset, added: list.some(function (entry) { return entry.id === preset.id; }) };
+        }), { emptyTitle: "没有预置模型", emptyDetail: "请打开官方 ClinePass 文档核对模型目录。" }))),
       ui.section("模型测试", "通过 ClinePassProxy 的真实数据路径发送一次最小请求",
         null,
         ui.card(null, null, null, el("div", { class: "stack" }, [
