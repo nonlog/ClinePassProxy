@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -150,6 +151,76 @@ func TestConnectorForwardsEveryConsolePath(t *testing.T) {
 	}
 	if got := upstreamPath("/v0/management/clinepassproxy/nope"); got != "" {
 		t.Errorf("unknown path mapped to %q", got)
+	}
+}
+
+func TestCPAExactManagementRoutesForwardCredentialActions(t *testing.T) {
+	const id = "cline-5794b5c46996"
+	type received struct{ method, path, auth, body string }
+	calls := make(chan received, 8)
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		payload, _ := io.ReadAll(r.Body)
+		calls <- received{r.Method, r.URL.Path, r.Header.Get("Authorization"), string(payload)}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"ok":true}`)
+	}))
+	defer proxy.Close()
+
+	service := NewService()
+	if err := service.Configure(json.RawMessage(`{"proxy_url":"` + proxy.URL + `","management_token":"mgmt-token"}`)); err != nil {
+		t.Fatal(err)
+	}
+	declared := make(map[string]bool)
+	for _, route := range service.Routes() {
+		declared[route.Method+" "+route.Path] = true
+		if strings.ContainsAny(route.Path, "{}*:") {
+			t.Fatalf("CPA does not support dynamic route syntax: %s", route.Path)
+		}
+	}
+	cases := []struct {
+		method, route, target string
+	}{
+		{http.MethodPut, panelPrefix + "/credentials/item", "/api/credentials/" + id},
+		{http.MethodDelete, panelPrefix + "/credentials/item", "/api/credentials/" + id},
+		{http.MethodPost, panelPrefix + "/credentials/test", "/api/credentials/" + id + "/test"},
+		{http.MethodPost, panelPrefix + "/credentials/refresh", "/api/credentials/" + id + "/refresh"},
+		{http.MethodGet, panelPrefix + "/requests/item", "/api/requests/" + id},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method+" "+tc.route, func(t *testing.T) {
+			if !declared[tc.method+" "+tc.route] {
+				t.Fatalf("CPA cannot dispatch unregistered route %s %s", tc.method, tc.route)
+			}
+			query := url.Values{"id": {id}}
+			status, _, body, err := service.HandleManagement(tc.method, tc.route, query, nil, []byte(`{"label":"new-label"}`))
+			if err != nil || status != http.StatusOK {
+				t.Fatalf("forwarding returned %d %s, %v", status, body, err)
+			}
+			got := <-calls
+			if got.method != tc.method || got.path != tc.target {
+				t.Fatalf("upstream request = %s %s, want %s %s", got.method, got.path, tc.method, tc.target)
+			}
+			if got.auth != "Bearer mgmt-token" || got.body != `{"label":"new-label"}` {
+				t.Fatalf("upstream auth or body changed: auth=%q body=%q", got.auth, got.body)
+			}
+		})
+	}
+}
+
+func TestCPAResourceIDsCannotEscapeProxyRoutes(t *testing.T) {
+	service := NewService()
+	for _, id := range []string{"", "../status", "bad/key", "bad?key", "bad%2Fkey", strings.Repeat("a", 129)} {
+		status, _, _, err := service.HandleManagement(http.MethodPut, panelPrefix+"/credentials/item",
+			url.Values{"id": {id}}, nil, nil)
+		if err != nil || status != http.StatusBadRequest {
+			t.Errorf("id %q returned (%d, %v), want 400", id, status, err)
+		}
+	}
+	shim := panelShim()
+	for _, needle := range []string{"function target(i)", "credentials/", "requests/item?id=", "encodeURIComponent", "i=target(i)"} {
+		if !strings.Contains(shim, needle) {
+			t.Errorf("panel shim lacks %q for CPA exact-route mapping", needle)
+		}
 	}
 }
 

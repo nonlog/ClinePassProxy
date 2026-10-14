@@ -187,16 +187,18 @@ func (s *Service) Routes() []Route {
 		{"PUT", "/v0/management/clinepassproxy/config", "Update ClinePassProxy settings"},
 		{"GET", "/v0/management/clinepassproxy/credentials", "Credential pool"},
 		{"POST", "/v0/management/clinepassproxy/credentials", "Add a credential"},
-		{"PUT", "/v0/management/clinepassproxy/credentials/{id}", "Update a credential"},
-		{"DELETE", "/v0/management/clinepassproxy/credentials/{id}", "Delete a credential"},
-		{"POST", "/v0/management/clinepassproxy/credentials/{id}/test", "Test a credential"},
-		{"POST", "/v0/management/clinepassproxy/credentials/{id}/refresh", "Refresh credential quota"},
+		// CPA matches exact paths and does not expand {id} templates.
+		// The CPA-facing paths are fixed; the browser passes ?id=...
+		{"PUT", "/v0/management/clinepassproxy/credentials/item", "Update a credential"},
+		{"DELETE", "/v0/management/clinepassproxy/credentials/item", "Delete a credential"},
+		{"POST", "/v0/management/clinepassproxy/credentials/test", "Test a credential"},
+		{"POST", "/v0/management/clinepassproxy/credentials/refresh", "Refresh credential quota"},
 		{"GET", "/v0/management/clinepassproxy/models", "Model alias table"},
 		{"POST", "/v0/management/clinepassproxy/models/test", "Issue a test completion"},
 		{"POST", "/v0/management/clinepassproxy/models/providers/probe", "Discover upstream providers for a model"},
 		{"GET", "/v0/management/clinepassproxy/usage", "Usage summary"},
 		{"GET", "/v0/management/clinepassproxy/requests", "Request diagnostics"},
-		{"GET", "/v0/management/clinepassproxy/requests/{id}", "One request diagnostic record"},
+		{"GET", "/v0/management/clinepassproxy/requests/item", "One request diagnostic record"},
 	}
 	routes := make([]Route, 0, len(patterns)+1)
 	for _, pattern := range patterns {
@@ -238,7 +240,11 @@ func (s *Service) HandleManagement(method, path string, query url.Values, header
 		return s.panel()
 	}
 
-	target := upstreamPath(path)
+	target, query, err := managementTarget(path, query)
+	if err != nil {
+		payload, _ := json.Marshal(map[string]string{"error": err.Error()})
+		return http.StatusBadRequest, http.Header{"Content-Type": []string{"application/json"}}, payload, nil
+	}
 	if target == "" {
 		return http.StatusNotFound, nil, nil, fmt.Errorf("unsupported management path %s", path)
 	}
@@ -310,6 +316,52 @@ func upstreamPath(path string) string {
 	default:
 		return ""
 	}
+}
+
+// managementTarget maps CPA's fixed, exact-match plugin routes onto the
+// standalone REST API. CPA cannot register path parameters. The browser sends
+// opaque IDs in the query, and the connector passes them only in the upstream
+// URL path; the upstream management token remains server-side.
+func managementTarget(path string, query url.Values) (string, url.Values, error) {
+	const prefix = "/v0/management/clinepassproxy"
+	var base, suffix string
+	switch path {
+	case prefix + "/credentials/item":
+		base = "/api/credentials/"
+	case prefix + "/credentials/test":
+		base, suffix = "/api/credentials/", "/test"
+	case prefix + "/credentials/refresh":
+		base, suffix = "/api/credentials/", "/refresh"
+	case prefix + "/requests/item":
+		base = "/api/requests/"
+	default:
+		return upstreamPath(path), query, nil
+	}
+	id := strings.TrimSpace(query.Get("id"))
+	if !validManagementID(id) || len(query["id"]) != 1 {
+		return "", nil, errors.New("missing or invalid management resource id")
+	}
+	rest := url.Values{}
+	for key, values := range query {
+		if key != "id" {
+			rest[key] = append([]string(nil), values...)
+		}
+	}
+	return base + url.PathEscape(id) + suffix, rest, nil
+}
+
+func validManagementID(id string) bool {
+	if id == "" || len(id) > 128 || strings.Contains(id, "..") {
+		return false
+	}
+	for _, ch := range id {
+		if (ch < 'a' || ch > 'z') && (ch < 'A' || ch > 'Z') &&
+			(ch < '0' || ch > '9') && ch != '-' && ch != '_' &&
+			ch != '.' && ch != ':' {
+			return false
+		}
+	}
+	return true
 }
 
 // Shutdown releases connector resources.
@@ -393,8 +445,16 @@ func panelShim() string {
 		"var a=JSON.parse(v).state;if(!a||a.rememberPassword!==true||typeof a.managementKey!=='string')return'';" +
 		"return a.managementKey.trim();}catch(e){return'';}}" +
 		"var P=\"" + panelPrefix + "\",f=window.fetch;" +
+		// CPA only supports exact registered management routes; map the
+		// standalone /api/{resource}/{id} URLs to fixed CPA routes with ?id=.
+		"function target(i){var q=i.indexOf('?'),b=q<0?i:i.slice(0,q),tail=q<0?'':i.slice(q+1);" +
+		"var c=b.match(/^\\/api\\/credentials\\/([^/]+)(?:\\/(test|refresh))?$/);" +
+		"if(c){var next=P+'/credentials/'+(c[2]||'item')+'?id='+encodeURIComponent(decodeURIComponent(c[1]));return next+(tail?'&'+tail:'');}" +
+		"var d=b.match(/^\\/api\\/requests\\/([^/]+)$/);" +
+		"if(d){var next=P+'/requests/item?id='+encodeURIComponent(decodeURIComponent(d[1]));return next+(tail?'&'+tail:'');}" +
+		"return P+i.slice(4);}" +
 		"window.fetch=function(i,n){if(typeof i===\"string\"&&i.indexOf(\"/api/\")===0){" +
-		"i=P+i.slice(4);n=n||{};var h=new Headers(n.headers||{}),a=k();" +
+		"i=target(i);n=n||{};var h=new Headers(n.headers||{}),a=k();" +
 		"if(a&&!h.has('Authorization'))h.set('Authorization','Bearer '+a);" +
 		"n=Object.assign({},n,{headers:h});}return f.call(this,i,n);};})();</script>"
 }
