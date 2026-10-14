@@ -746,6 +746,16 @@
     }
     var testCredential = el("select", {}, [el("option", { value: "", text: "自动（第一个启用凭据）" })].concat(
       (state.credentials || []).map(function (view) { return el("option", { value: view.id, text: view.label || view.id }); })));
+    var testReasoning = el("select", {}, [
+      { value: "", label: "不指定（透传默认）" },
+      { value: "none", label: "none" },
+      { value: "minimal", label: "minimal" },
+      { value: "low", label: "low" },
+      { value: "medium", label: "medium" },
+      { value: "high", label: "high" },
+      { value: "xhigh", label: "xhigh" },
+      { value: "max", label: "max" }
+    ].map(function (option) { return el("option", { value: option.value }, option.label); }));
     var testResult = el("div", { class: "hint", text: "尚未测试" });
     var testButton = el("button", { class: "btn primary", type: "button" }, "发送测试请求");
     testButton.addEventListener("click", function () {
@@ -755,12 +765,13 @@
         try {
           var result = await client.api("/api/models/test", {
             method: "POST",
-            body: JSON.stringify({ model: testModel.value, credential_id: testCredential.value })
+            body: JSON.stringify({ model: testModel.value, credential_id: testCredential.value, reasoning_effort: testReasoning.value })
           });
           if (result.ok) {
             testResult.className = "ok-text";
             testResult.textContent = "成功 · " + fmt.ms(result.latency_ms) + " · 上游模型 " + (result.upstream_model || "") +
               " · 实际 Provider：" + (result.provider || "未返回") +
+              " · 思考强度：" + (testReasoning.value || "未指定") +
               " · 回复：" + (result.reply || "(空)");
             ui.toast("模型测试通过（" + fmt.ms(result.latency_ms) + "）", "ok");
           } else {
@@ -829,6 +840,7 @@
           el("div", { class: "filters" }, [
             el("label", { class: "field" }, [el("span", { text: "模型" }), testModel]),
             el("label", { class: "field" }, [el("span", { text: "凭据" }), testCredential]),
+            el("label", { class: "field" }, [el("span", { text: "测试思考强度" }), testReasoning]),
             testButton
           ]),
           testResult,

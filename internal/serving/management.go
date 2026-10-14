@@ -828,13 +828,20 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 	settings := s.Config.Get()
 	s.upstream.SetBaseURL(settings.BaseURL)
 	var payload struct {
-		Model        string `json:"model"`
-		Prompt       string `json:"prompt"`
-		CredentialID string `json:"credential_id"`
-		Stream       bool   `json:"stream"`
+		Model           string `json:"model"`
+		Prompt          string `json:"prompt"`
+		CredentialID    string `json:"credential_id"`
+		ReasoningEffort string `json:"reasoning_effort"`
 	}
 	if err := decodeJSON(r, &payload); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	payload.ReasoningEffort = strings.ToLower(strings.TrimSpace(payload.ReasoningEffort))
+	switch payload.ReasoningEffort {
+	case "", "none", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		writeError(w, http.StatusBadRequest, "invalid test reasoning_effort")
 		return
 	}
 	entry, upstreamModel, ok := models.Table{Entries: settings.Models}.ResolveEntry(payload.Model)
@@ -869,6 +876,9 @@ func (s *Server) handleTestModel(w http.ResponseWriter, r *http.Request) {
 		"messages":   []any{map[string]any{"role": "user", "content": payload.Prompt}},
 		"max_tokens": 64,
 		"stream":     false,
+	}
+	if payload.ReasoningEffort != "" {
+		testPayload["reasoning_effort"] = payload.ReasoningEffort
 	}
 	applyProviderSelection(testPayload, entry.Providers, entry.ProviderPipeline)
 	status, body, err := s.routingProbeChat(ctxOrBackground(r), credential, testPayload, time.Duration(settings.TimeoutSeconds)*time.Second)
